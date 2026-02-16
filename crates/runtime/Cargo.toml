@@ -38,6 +38,7 @@ bytes.workspace = true
 cache = { path = "../cache" }
 chrono.workspace = true
 chunking = { path = "../chunking" }
+croner = "3.0.0"
 clap.workspace = true
 csv = "1.3.0"
 dashmap = "6.1.0"
@@ -80,6 +81,8 @@ iceberg-datafusion.workspace = true
 indexmap.workspace = true
 itertools.workspace = true
 jsonwebtoken = "10.3.0"
+k8s-openapi = { workspace = true, optional = true }
+kube = { workspace = true, optional = true }
 linkme.workspace = true
 llms = { path = "../llms", default-features = false }
 mediatype = "0.21.0"
@@ -122,6 +125,7 @@ rmcp = { workspace = true, optional = true, features = [
     "transport-streamable-http-server",
 ] }
 runtime-acceleration = { path = "../runtime-acceleration" }
+runtime-agentic = { path = "../runtime-agentic" }
 runtime-api-types = { path = "../runtime-api-types" }
 runtime-async = { path = "../runtime-async" }
 runtime-auth = { path = "../runtime-auth" }
@@ -177,6 +181,7 @@ utoipa-swagger-ui = { version = ">=8.1.1", features = [
     "axum",
 ], optional = true }
 
+git2.workspace = true
 gethostname.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 workers = { path = "../workers" }
@@ -282,6 +287,7 @@ iceberg-write = []
 imap = ["data_components/imap"]
 kafka = ["data_components/kafka"]
 keyring-secret-store = ["runtime-secrets/keyring-secret-store"]
+kubernetes = ["dep:kube", "dep:k8s-openapi"]
 mcp = ["dep:rmcp", "tools/mcp"]
 metal = ["llms/metal"]
 models = [

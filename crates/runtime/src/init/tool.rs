@@ -26,6 +26,7 @@ use runtime_secrets::get_params_with_secrets;
 use secrecy::SecretString;
 use snafu::ResultExt;
 use spicepod::component::tool::Tool;
+use spicepod::component::write_tool::WriteTool;
 use util::{RetryError, fibonacci_backoff::FibonacciBackoffBuilder, retry};
 
 impl Runtime {
@@ -116,6 +117,90 @@ impl Runtime {
                     tracing::warn!(
                         "Unable to load tool '{}' from spicepod. Error: {}",
                         tool.name,
+                        e,
+                    );
+                    Err(RetryError::transient(e))
+                }
+            }
+        })
+        .await;
+    }
+
+    /// Load write tools from the spicepod definition.
+    ///
+    /// Write tools use the same forge/factory pattern as read tools but are stored
+    /// separately in `Runtime.write_tools` to enforce read/write capability separation.
+    pub(crate) async fn load_write_tools(self: Arc<Self>) {
+        let app_lock = self.app.read().await;
+        if let Some(app) = app_lock.as_ref() {
+            for write_tool in &app.write_tools {
+                tracing::debug!(
+                    "Loading write tool [{}] from {}...",
+                    write_tool.name,
+                    write_tool.from
+                );
+                Arc::clone(&self).load_write_tool(write_tool).await;
+            }
+        }
+    }
+
+    async fn insert_write_tool(&self, t: Tooling) {
+        let name = t.name().to_string();
+        let mut write_tools_map = self.write_tools.write().await;
+
+        write_tools_map.insert(name.clone(), t);
+        tracing::trace!("Write tool {} ready to use", name.clone());
+        metrics::tools::COUNT.add(1, &[KeyValue::new("write_tool", name.clone())]);
+        self.status
+            .update_tool(&name, status::ComponentStatus::Ready);
+    }
+
+    async fn load_write_tool(self: Arc<Self>, write_tool: &WriteTool) {
+        let retry_strategy = FibonacciBackoffBuilder::new()
+            .max_retries(None)
+            .max_duration(Some(Duration::from_secs(60)))
+            .build();
+
+        // Convert WriteTool to Tool for use with the existing forge factory
+        let tool_component = Tool {
+            from: write_tool.from.clone(),
+            name: write_tool.name.clone(),
+            description: write_tool.description.clone(),
+            params: write_tool.params.clone(),
+            env: write_tool.env.clone(),
+            depends_on: write_tool.depends_on.clone(),
+            metrics: None,
+        };
+
+        let _ = retry(retry_strategy, || async {
+            self.status
+                .update_tool(&tool_component.name, status::ComponentStatus::Initializing);
+            let params_with_secrets: HashMap<String, SecretString> =
+                get_params_with_secrets(self.secrets(), &tool_component.params).await;
+
+            let env_with_secrets: HashMap<String, SecretString> =
+                get_params_with_secrets(self.secrets(), &tool_component.env).await;
+
+            match tools::factory::forge(
+                &tool_component,
+                params_with_secrets,
+                Arc::clone(&self),
+                env_with_secrets,
+            )
+            .await
+            .context(UnableToInitializeLlmToolSnafu)
+            {
+                Ok(t) => {
+                    self.insert_write_tool(t).await;
+                    Ok(())
+                }
+                Err(e) => {
+                    metrics::tools::LOAD_ERROR.add(1, &[]);
+                    self.status
+                        .update_tool(&tool_component.name, status::ComponentStatus::Error);
+                    tracing::warn!(
+                        "Unable to load write tool '{}' from spicepod. Error: {}",
+                        tool_component.name,
                         e,
                     );
                     Err(RetryError::transient(e))

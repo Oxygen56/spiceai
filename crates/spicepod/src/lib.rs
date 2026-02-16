@@ -29,8 +29,9 @@ use std::{fmt::Debug, path::PathBuf};
 use std::sync::Arc;
 
 use component::{
-    catalog::Catalog, dataset::Dataset, embeddings::Embeddings, eval::Eval, model::Model,
-    runtime::Runtime, secret::Secret, snapshot::Snapshots, tool::Tool, view::View, worker::Worker,
+    agent::Agent, catalog::Catalog, dataset::Dataset, embeddings::Embeddings, eval::Eval,
+    file_source::FileSource, model::Model, runtime::Runtime, secret::Secret, snapshot::Snapshots,
+    tool::Tool, view::View, worker::Worker, write_tool::WriteTool,
 };
 
 use crate::component::Nameable;
@@ -140,7 +141,13 @@ pub struct Spicepod {
 
     pub tools: Vec<Tool>,
 
+    pub write_tools: Vec<WriteTool>,
+
     pub workers: Vec<Worker>,
+
+    pub file_sources: Vec<FileSource>,
+
+    pub agents: Vec<Agent>,
 
     pub runtime: Runtime,
 
@@ -281,11 +288,38 @@ impl Spicepod {
                 .await
                 .context(UnableToResolveSpicepodComponentsSnafu { path: path.clone() })?;
 
+        let resolved_write_tools = component::resolve_component_references(
+            fs,
+            &path,
+            &spicepod_definition.write_tools,
+            "write_tools",
+        )
+        .await
+        .context(UnableToResolveSpicepodComponentsSnafu { path: path.clone() })?;
+
         let resolved_workers = component::resolve_component_references(
             fs,
             &path,
             &spicepod_definition.workers,
             "workers",
+        )
+        .await
+        .context(UnableToResolveSpicepodComponentsSnafu { path: path.clone() })?;
+
+        let resolved_file_sources = component::resolve_component_references(
+            fs,
+            &path,
+            &spicepod_definition.file_sources,
+            "file_sources",
+        )
+        .await
+        .context(UnableToResolveSpicepodComponentsSnafu { path: path.clone() })?;
+
+        let resolved_agents = component::resolve_component_references(
+            fs,
+            &path,
+            &spicepod_definition.agents,
+            "agents",
         )
         .await
         .context(UnableToResolveSpicepodComponentsSnafu { path: path.clone() })?;
@@ -297,7 +331,10 @@ impl Spicepod {
         detect_duplicate_component_names("embedding", &resolved_embeddings[..])?;
         detect_duplicate_component_names("eval", &resolved_evals[..])?;
         detect_duplicate_component_names("tool", &resolved_tools[..])?;
+        detect_duplicate_component_names("write_tool", &resolved_write_tools[..])?;
         detect_duplicate_component_names("worker", &resolved_workers[..])?;
+        detect_duplicate_component_names("file_source", &resolved_file_sources[..])?;
+        detect_duplicate_component_names("agent", &resolved_agents[..])?;
 
         check_for_reserved_keywords(&resolved_datasets[..])?;
 
@@ -309,8 +346,11 @@ impl Spicepod {
             resolved_embeddings,
             resolved_evals,
             resolved_tools,
+            resolved_write_tools,
             resolved_models,
             resolved_workers,
+            resolved_file_sources,
+            resolved_agents,
         ))
     }
 
@@ -398,8 +438,11 @@ fn from_definition(
     embeddings: Vec<Embeddings>,
     evals: Vec<Eval>,
     tools: Vec<Tool>,
+    write_tools: Vec<WriteTool>,
     models: Vec<Model>,
     workers: Vec<Worker>,
+    file_sources: Vec<FileSource>,
+    agents: Vec<Agent>,
 ) -> Spicepod {
     Spicepod {
         name: spicepod_definition.name,
@@ -413,7 +456,10 @@ fn from_definition(
         embeddings,
         evals,
         tools,
+        write_tools,
         workers,
+        file_sources,
+        agents,
         dependencies: spicepod_definition.dependencies,
         runtime: spicepod_definition.runtime,
         management: spicepod_definition.management,

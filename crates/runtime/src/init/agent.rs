@@ -1,0 +1,671 @@
+/*
+Copyright 2024-2025 The Spice.ai OSS Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use async_openai::types::chat::{
+    ChatChoice, ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionTool, ChatCompletionTools,
+    CreateChatCompletionRequestArgs, FunctionObject,
+};
+use async_trait::async_trait;
+use itertools::Itertools;
+use tools::SpiceModelTool;
+use tracing_futures::Instrument;
+
+use crate::tools::builtin::fail::FailTool;
+
+use crate::memory::layers::{
+    knowledge_base::KnowledgeBaseLayer, session::SessionLayer,
+    session_summary::SessionSummaryLayer, weekly_rollup::WeeklyRollupLayer,
+};
+use crate::memory::{MemoryLayer, MemoryManager, parse_retention};
+use crate::model::LLMChatCompletionsModelStore;
+use crate::pipeline::executor;
+use crate::pipeline::resolve::resolve_workflow;
+use crate::pipeline::vote::ModelCaller;
+use crate::pipeline::ResolvedWorkflow;
+use crate::session::in_memory::InMemorySessionStore;
+use crate::session::SessionStore;
+use crate::trigger::schedule::ScheduleTriggerFactory;
+use crate::trigger::webhook::WebhookTriggerFactory;
+use crate::trigger::{Trigger, TriggerHandler, TriggerPayload, TriggerRegistry};
+use crate::Runtime;
+use spicepod::component::agent::Agent;
+use spicepod::component::session::SessionConfig;
+use tokio::sync::RwLock;
+
+/// Registry of webhook trigger handlers keyed by path.
+/// Shared between agent initialization and the HTTP webhook handler.
+pub type WebhookRegistry = Arc<RwLock<HashMap<String, Arc<dyn TriggerHandler>>>>;
+
+/// Holds the runtime state for a loaded agent.
+pub struct LoadedAgent {
+    pub name: String,
+    pub config: Agent,
+    pub pipelines: Vec<ResolvedWorkflow>,
+    pub triggers: Vec<Box<dyn Trigger>>,
+    pub session_store: Arc<dyn SessionStore>,
+    pub session_config: SessionConfig,
+    pub memory_manager: Option<MemoryManager>,
+}
+
+/// A `TriggerHandler` that executes a pipeline when invoked.
+struct PipelineTriggerHandler {
+    pipeline: ResolvedWorkflow,
+    session_store: Arc<dyn SessionStore>,
+    session_config: SessionConfig,
+    memory_manager: Option<MemoryManager>,
+    model_caller: Arc<dyn ModelCaller>,
+}
+
+#[async_trait]
+impl TriggerHandler for PipelineTriggerHandler {
+    async fn handle(
+        &self,
+        payload: TriggerPayload,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let result = executor::execute_workflow(
+            &self.pipeline,
+            &payload,
+            self.session_store.as_ref(),
+            &self.session_config,
+            self.memory_manager.as_ref(),
+            self.model_caller.as_ref(),
+            None,
+        )
+        .await?;
+
+        tracing::info!(
+            pipeline = %result.workflow_name,
+            session_id = %result.session_id,
+            steps = result.steps_executed,
+            "Pipeline execution completed"
+        );
+
+        Ok(())
+    }
+}
+
+/// Maximum number of retries when the model fails to use required tools.
+const REQUIRED_TOOL_RETRIES: usize = 3;
+
+/// Name of the auto-injected fail tool.
+const FAIL_TOOL_NAME: &str = "fail";
+
+/// Outcome of a single iteration in the tool-calling loop.
+enum IterationOutcome {
+    /// Model returned content without calling any tools — iteration is done.
+    Done(String, HashSet<String>),
+    /// Model called tools and results were fed back — continue looping.
+    Continue(HashSet<String>),
+}
+
+/// A `ModelCaller` that looks up models from the runtime's `completion_llms` store.
+/// Handles step-specific tool execution with a tool-calling loop and required tool enforcement.
+struct RuntimeModelCaller {
+    llms: Arc<RwLock<LLMChatCompletionsModelStore>>,
+}
+
+impl RuntimeModelCaller {
+    /// Convert `SpiceModelTool` instances to `ChatCompletionTool` schemas for the request.
+    fn tools_to_schemas(tools: &[Arc<dyn SpiceModelTool>]) -> Vec<ChatCompletionTools> {
+        tools
+            .iter()
+            .map(|t| {
+                ChatCompletionTools::Function(ChatCompletionTool {
+                    function: FunctionObject {
+                        strict: t.strict(),
+                        name: crate::model::tool_use::encode_tool_name(
+                            t.name().to_string().as_str(),
+                        ),
+                        description: t.description().map(|d| d.to_string()),
+                        parameters: t.parameters(),
+                    },
+                })
+            })
+            .collect()
+    }
+
+    /// Find a step tool by its encoded name.
+    fn find_tool<'a>(
+        tools: &'a [Arc<dyn SpiceModelTool>],
+        encoded_name: &str,
+    ) -> Option<&'a Arc<dyn SpiceModelTool>> {
+        tools.iter().find(|t| {
+            crate::model::tool_use::encode_tool_name(t.name().as_ref()) == encoded_name
+        })
+    }
+
+    /// Extract tool calls from a model response, returning only step-level tool calls.
+    fn extract_step_tool_calls(
+        response: &async_openai::types::chat::CreateChatCompletionResponse,
+        all_step_tools: &[Arc<dyn SpiceModelTool>],
+    ) -> Vec<ChatCompletionMessageToolCall> {
+        response
+            .choices
+            .first()
+            .and_then(|c| c.message.tool_calls.as_ref())
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter_map(|tc| match tc {
+                        ChatCompletionMessageToolCalls::Function(call)
+                            if Self::find_tool(all_step_tools, &call.function.name).is_some() =>
+                        {
+                            Some(call.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Run a single model call with tool-calling loop. Returns (content, set of tools called).
+    ///
+    /// If the model calls the `fail` tool, returns an error immediately.
+    async fn call_with_tool_loop(
+        model: &Arc<dyn llms::chat::Chat>,
+        step_name: &str,
+        model_name: &str,
+        messages: Vec<ChatCompletionRequestMessage>,
+        tool_schemas: &[ChatCompletionTools],
+        all_step_tools: &[Arc<dyn SpiceModelTool>],
+        max_iterations: usize,
+    ) -> Result<(String, HashSet<String>), Box<dyn std::error::Error + Send + Sync>> {
+        let mut current_messages = messages;
+        let mut tools_called = HashSet::new();
+
+        for iteration in 0..max_iterations {
+            let iter_span = tracing::info_span!(
+                target: "task_history",
+                "tool_iteration",
+                step = %step_name,
+                iteration = iteration,
+                model = %model_name,
+            );
+
+            let iter_result: Result<IterationOutcome, Box<dyn std::error::Error + Send + Sync>> = async {
+                let mut req_builder = CreateChatCompletionRequestArgs::default();
+                req_builder.model(model_name).messages(current_messages.clone());
+                if !tool_schemas.is_empty() {
+                    req_builder.tools(tool_schemas.to_vec());
+                }
+                let req = req_builder.build()?;
+
+                let response = model.chat_request(req).await?;
+
+                // Check for step-level tool calls
+                let step_tool_calls = Self::extract_step_tool_calls(&response, all_step_tools);
+
+                if step_tool_calls.is_empty() {
+                    // No step tools called — return the text content
+                    let content = response
+                        .choices
+                        .first()
+                        .and_then(|ChatChoice { message, .. }| message.content.clone())
+                        .unwrap_or_default();
+                    return Ok(IterationOutcome::Done(content, HashSet::new()));
+                }
+
+                // Execute the step tools and build messages for the next round
+                let assistant_message: ChatCompletionRequestMessage =
+                    ChatCompletionRequestAssistantMessageArgs::default()
+                        .tool_calls(
+                            step_tool_calls
+                                .iter()
+                                .map(|t| ChatCompletionMessageToolCalls::Function(t.clone()))
+                                .collect::<Vec<_>>(),
+                        )
+                        .build()?
+                        .into();
+                current_messages.push(assistant_message);
+
+                let mut iter_tools = HashSet::new();
+
+                for tool_call in &step_tool_calls {
+                    // Check for `fail` tool — short-circuit immediately
+                    if let Some(tool) = Self::find_tool(all_step_tools, &tool_call.function.name) {
+                        if tool.name() == FAIL_TOOL_NAME {
+                            let reason = serde_json::from_str::<serde_json::Value>(
+                                &tool_call.function.arguments,
+                            )
+                            .ok()
+                            .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(String::from))
+                            .unwrap_or_else(|| tool_call.function.arguments.clone());
+                            tracing::error!(
+                                target: "task_history",
+                                tool = FAIL_TOOL_NAME,
+                                reason = %reason,
+                                "Step failed via fail tool"
+                            );
+                            return Err(format!("Step failed: {reason}").into());
+                        }
+                    }
+
+                    let tool_result =
+                        if let Some(tool) = Self::find_tool(all_step_tools, &tool_call.function.name) {
+                            iter_tools.insert(tool.name().to_string());
+                            tracing::info!(
+                                target: "task_history",
+                                tool = %tool.name(),
+                                args = %tool_call.function.arguments,
+                                "Executing step tool"
+                            );
+                            match tool.call(&tool_call.function.arguments).await {
+                                Ok(v) => v.to_string(),
+                                Err(e) => format!("Tool error: {e}"),
+                            }
+                        } else {
+                            "Unknown tool".to_string()
+                        };
+
+                    let tool_message: ChatCompletionRequestMessage =
+                        ChatCompletionRequestToolMessageArgs::default()
+                            .content(tool_result)
+                            .tool_call_id(tool_call.id.clone())
+                            .build()?
+                            .into();
+                    current_messages.push(tool_message);
+                }
+
+                Ok(IterationOutcome::Continue(iter_tools))
+            }
+            .instrument(iter_span)
+            .await;
+
+            match iter_result? {
+                IterationOutcome::Done(content, _) => return Ok((content, tools_called)),
+                IterationOutcome::Continue(iter_tools) => {
+                    tools_called.extend(iter_tools);
+                }
+            }
+        }
+
+        // Hit the loop limit — return whatever content we have
+        Err(format!(
+            "Step tool calling loop exceeded maximum iterations ({max_iterations})"
+        )
+        .into())
+    }
+}
+
+#[async_trait]
+impl ModelCaller for RuntimeModelCaller {
+    async fn call_model(
+        &self,
+        step_name: &str,
+        model_name: &str,
+        system_prompt: &str,
+        user_message: &str,
+        required_tools: &[Arc<dyn SpiceModelTool>],
+        optional_tools: &[Arc<dyn SpiceModelTool>],
+        max_iterations: usize,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let llms = self.llms.read().await;
+        let model = llms
+            .get(model_name)
+            .ok_or_else(|| format!("Model '{model_name}' not found in loaded LLMs"))?;
+        let model = Arc::clone(model);
+        drop(llms);
+
+        // Auto-inject the fail tool + merge all step tools
+        let fail_tool: Arc<dyn SpiceModelTool> = Arc::new(FailTool::new(None, None));
+        let mut all_step_tools: Vec<Arc<dyn SpiceModelTool>> = vec![fail_tool];
+        all_step_tools.extend(required_tools.iter().cloned());
+        all_step_tools.extend(optional_tools.iter().cloned());
+
+        // Build tool schemas for the request
+        let tool_schemas = Self::tools_to_schemas(&all_step_tools);
+
+        // Build the user message, injecting required tool instructions if needed
+        let effective_user_message = if required_tools.is_empty() {
+            user_message.to_string()
+        } else {
+            let tool_names: Vec<String> =
+                required_tools.iter().map(|t| t.name().to_string()).collect();
+            format!(
+                "{user_message}\n\nYou MUST use the following tools in this step: [{}]. Call each at least once before responding.",
+                tool_names.join(", ")
+            )
+        };
+
+        // Build initial messages
+        let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+        if !system_prompt.is_empty() {
+            messages.push(
+                ChatCompletionRequestSystemMessageArgs::default()
+                    .content(system_prompt)
+                    .build()?
+                    .into(),
+            );
+        }
+        messages.push(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(effective_user_message.as_str())
+                .build()?
+                .into(),
+        );
+
+        // Required tool tracking — persists across retries
+        let required_names: HashSet<String> = required_tools
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        let mut all_tools_used = HashSet::new();
+
+        for attempt in 0..=REQUIRED_TOOL_RETRIES {
+            let attempt_span = tracing::info_span!(
+                target: "task_history",
+                "model_call_attempt",
+                step = %step_name,
+                model = %model_name,
+                attempt = attempt,
+            );
+
+            let attempt_result: Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> = async {
+                let mut attempt_messages = messages.clone();
+
+                // On retry, add a nudge about missing required tools
+                if attempt > 0 {
+                    let still_missing: Vec<String> = required_names
+                        .iter()
+                        .filter(|n| !all_tools_used.contains(*n))
+                        .cloned()
+                        .collect();
+                    tracing::warn!(
+                        target: "task_history",
+                        attempt = attempt,
+                        missing = ?still_missing,
+                        "Retrying step because required tools were not used"
+                    );
+                    attempt_messages.push(
+                        ChatCompletionRequestUserMessageArgs::default()
+                            .content(format!(
+                                "You did not use the required tools: [{}]. You MUST call them before responding.",
+                                still_missing.join(", ")
+                            ))
+                            .build()?
+                            .into(),
+                    );
+                }
+
+                let (content, tools_called) = Self::call_with_tool_loop(
+                    &model,
+                    step_name,
+                    model_name,
+                    attempt_messages,
+                    &tool_schemas,
+                    &all_step_tools,
+                    max_iterations,
+                )
+                .await?;
+
+                // Accumulate tools used across retries
+                all_tools_used.extend(tools_called);
+
+                // Check if all required tools were used (across all attempts)
+                if required_names.is_empty() || required_names.is_subset(&all_tools_used) {
+                    return Ok(Some(content));
+                }
+
+                let missing: Vec<&str> = required_names
+                    .iter()
+                    .filter(|n| !all_tools_used.contains(*n))
+                    .map(String::as_str)
+                    .collect();
+                if !missing.is_empty() {
+                    tracing::warn!(
+                        target: "task_history",
+                        missing_tools = ?missing,
+                        attempt = attempt,
+                        "Required tools not used by model"
+                    );
+                }
+
+                Ok(None)
+            }
+            .instrument(attempt_span)
+            .await;
+
+            match attempt_result? {
+                Some(content) => return Ok(content),
+                None => continue,
+            }
+        }
+
+        Err(format!(
+            "Model failed to use required tools [{}] after {} retries",
+            required_names
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            REQUIRED_TOOL_RETRIES
+        )
+        .into())
+    }
+}
+
+impl Runtime {
+    pub(crate) async fn load_agents(self: Arc<Self>) {
+        let app_lock = self.app.read().await;
+
+        if let Some(app) = app_lock.as_ref() {
+            if app.agents.is_empty() {
+                return;
+            }
+
+            for agent in &app.agents {
+                tracing::info!("Loading agent [{}]...", agent.name);
+                match self.load_agent(agent).await {
+                    Ok(loaded) => {
+                        tracing::info!(
+                            "Agent [{}] loaded with {} pipeline(s), {} trigger(s)",
+                            loaded.name,
+                            loaded.pipelines.len(),
+                            loaded.triggers.len(),
+                        );
+                        let mut agents = self.agents.write().await;
+                        agents.insert(loaded.name.clone(), loaded);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load agent [{}]: {e}", agent.name);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn load_agent(
+        &self,
+        agent: &Agent,
+    ) -> Result<LoadedAgent, Box<dyn std::error::Error + Send + Sync>> {
+        // Build read tools map from runtime's loaded tools
+        let tools_lock = self.tools.read().await;
+        let mut available_read_tools: HashMap<String, Arc<dyn tools::SpiceModelTool>> =
+            HashMap::new();
+        for (name, tooling) in tools_lock.iter() {
+            if let Some(tool) = tooling.as_individual() {
+                available_read_tools.insert(name.clone(), Arc::clone(tool));
+            }
+        }
+        drop(tools_lock);
+
+        // Build write tools map from runtime's loaded write tools
+        let write_tools_lock = self.write_tools.read().await;
+        let mut available_write_tools: HashMap<String, Arc<dyn tools::SpiceModelTool>> =
+            HashMap::new();
+        for (name, tooling) in write_tools_lock.iter() {
+            if let Some(tool) = tooling.as_individual() {
+                available_write_tools.insert(name.clone(), Arc::clone(tool));
+            }
+        }
+        drop(write_tools_lock);
+
+        // Resolve pipelines
+        let mut resolved_pipelines = Vec::new();
+        for pipeline_config in &agent.pipelines {
+            let resolved = resolve_workflow(
+                pipeline_config,
+                agent,
+                &available_read_tools,
+                &available_write_tools,
+            )?;
+            resolved_pipelines.push(resolved);
+        }
+
+        // Build trigger registry
+        let mut trigger_registry = TriggerRegistry::new();
+        trigger_registry.register(Arc::new(WebhookTriggerFactory));
+        trigger_registry.register(Arc::new(ScheduleTriggerFactory));
+
+        // Build session store
+        let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
+
+        // Build session config
+        let session_config = agent.session.clone().unwrap_or(SessionConfig {
+            scope: Some("per_task".to_string()),
+            reset: Some("never".to_string()),
+            params: HashMap::new(),
+        });
+
+        // Build memory manager
+        let memory_manager = build_memory_manager(agent);
+
+        // Build model caller
+        let model_caller: Arc<dyn ModelCaller> = Arc::new(RuntimeModelCaller {
+            llms: self.completion_llms(),
+        });
+
+        // Create and start triggers for each pipeline
+        let mut triggers: Vec<Box<dyn Trigger>> = Vec::new();
+        let webhook_registry = self.webhook_registry.clone();
+
+        for pipeline in &resolved_pipelines {
+            // Find the matching pipeline config to get the trigger config
+            let pipeline_config = agent
+                .pipelines
+                .iter()
+                .find(|p| p.name == pipeline.name);
+
+            let Some(pipeline_config) = pipeline_config else {
+                tracing::warn!(
+                    "No pipeline config found for resolved pipeline '{}', skipping trigger",
+                    pipeline.name
+                );
+                continue;
+            };
+
+            let trigger = match trigger_registry.create(&pipeline_config.trigger) {
+                Ok(trigger) => trigger,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to create trigger for pipeline '{}': {e}",
+                        pipeline.name
+                    );
+                    continue;
+                }
+            };
+
+            let handler: Arc<dyn TriggerHandler> = Arc::new(PipelineTriggerHandler {
+                pipeline: pipeline.clone(),
+                session_store: Arc::clone(&session_store),
+                session_config: session_config.clone(),
+                memory_manager: memory_manager.clone(),
+                model_caller: Arc::clone(&model_caller),
+            });
+
+            // For webhook triggers, register the handler in the webhook registry
+            if pipeline_config.trigger.r#type == "webhook" {
+                let path = pipeline_config
+                    .trigger
+                    .params
+                    .get("path")
+                    .cloned()
+                    .unwrap_or_else(|| "/webhook".to_string());
+
+                let mut registry = webhook_registry.write().await;
+                registry.insert(path.clone(), Arc::clone(&handler));
+                tracing::info!(
+                    "Registered webhook handler for agent '{}' pipeline '{}' at path '{path}'",
+                    agent.name,
+                    pipeline.name,
+                );
+            }
+
+            if let Err(e) = trigger.start(handler).await {
+                tracing::error!(
+                    "Failed to start trigger for pipeline '{}': {e}",
+                    pipeline.name
+                );
+                continue;
+            }
+
+            triggers.push(trigger);
+        }
+
+        Ok(LoadedAgent {
+            name: agent.name.clone(),
+            config: agent.clone(),
+            pipelines: resolved_pipelines,
+            triggers,
+            session_store,
+            session_config,
+            memory_manager,
+        })
+    }
+}
+
+fn build_memory_manager(agent: &Agent) -> Option<MemoryManager> {
+    let memory_config = agent.memory.as_ref()?;
+    let mut layers: Vec<Arc<dyn MemoryLayer>> = Vec::new();
+
+    for layer_config in &memory_config.layers {
+        let retention = layer_config
+            .retention
+            .as_deref()
+            .and_then(parse_retention);
+
+        let layer: Arc<dyn MemoryLayer> = match layer_config.r#type.as_str() {
+            "session" => Arc::new(SessionLayer::new(retention)),
+            "session_summary" => Arc::new(SessionSummaryLayer::new(retention)),
+            "weekly_rollup" => Arc::new(WeeklyRollupLayer::new(retention)),
+            "knowledge_base" => Arc::new(KnowledgeBaseLayer::new()),
+            other => {
+                tracing::warn!(
+                    "Unknown memory layer type '{}' for agent '{}', skipping",
+                    other,
+                    agent.name
+                );
+                continue;
+            }
+        };
+        layers.push(layer);
+    }
+
+    let session_threshold = memory_config
+        .compaction
+        .as_ref()
+        .and_then(|c| c.session_threshold)
+        .unwrap_or(50);
+
+    Some(MemoryManager::new(layers, session_threshold))
+}

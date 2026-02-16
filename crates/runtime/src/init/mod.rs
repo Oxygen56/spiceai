@@ -32,4 +32,6 @@ pub(crate) mod task_history;
 pub(crate) mod tool;
 pub(crate) mod view;
 
+pub(crate) mod agent;
+pub(crate) mod file_source;
 pub mod worker;

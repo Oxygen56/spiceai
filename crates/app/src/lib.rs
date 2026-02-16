@@ -24,11 +24,13 @@ pub use spicepod;
 use spicepod::{
     Spicepod,
     component::{
+        agent::Agent,
         caching::{CacheConfig, SQLResultsCacheConfig},
         catalog::Catalog,
         dataset::Dataset,
         embeddings::Embeddings,
         eval::Eval,
+        file_source::FileSource,
         management::Management,
         model::Model,
         runtime::{CorsConfig, Runtime, TlsConfig},
@@ -37,6 +39,7 @@ use spicepod::{
         tool::Tool,
         view::View,
         worker::Worker,
+        write_tool::WriteTool,
     },
     extension::Extension,
 };
@@ -66,7 +69,13 @@ pub struct App {
 
     pub tools: Vec<Tool>,
 
+    pub write_tools: Vec<WriteTool>,
+
     pub workers: Vec<Worker>,
+
+    pub file_sources: Vec<FileSource>,
+
+    pub agents: Vec<Agent>,
 
     pub spicepods: Vec<Spicepod>,
 
@@ -102,7 +111,10 @@ impl Default for App {
             embeddings: vec![],
             evals: vec![],
             tools: vec![],
+            write_tools: vec![],
             workers: vec![],
+            file_sources: vec![],
+            agents: vec![],
             spicepods: vec![],
             runtime: Runtime::default(),
             management: None,
@@ -133,7 +145,10 @@ pub struct AppBuilder {
     embeddings: Vec<Embeddings>,
     evals: Vec<Eval>,
     tools: Vec<Tool>,
+    write_tools: Vec<WriteTool>,
     workers: Vec<Worker>,
+    file_sources: Vec<FileSource>,
+    agents: Vec<Agent>,
     spicepods: Vec<Spicepod>,
     runtime: Runtime,
     management: Option<Management>,
@@ -153,7 +168,10 @@ impl AppBuilder {
             embeddings: vec![],
             evals: vec![],
             tools: vec![],
+            write_tools: vec![],
             workers: vec![],
+            file_sources: vec![],
+            agents: vec![],
             spicepods: vec![],
             runtime: Runtime::default(),
             management: None,
@@ -178,7 +196,10 @@ impl AppBuilder {
         self.embeddings.extend(spicepod.embeddings.clone());
         self.evals.extend(spicepod.evals.clone());
         self.tools.extend(spicepod.tools.clone());
+        self.write_tools.extend(spicepod.write_tools.clone());
         self.workers.extend(spicepod.workers.clone());
+        self.file_sources.extend(spicepod.file_sources.clone());
+        self.agents.extend(spicepod.agents.clone());
         self.spicepods.push(spicepod);
         self
     }
@@ -350,7 +371,10 @@ impl AppBuilder {
             embeddings: self.embeddings,
             evals: self.evals,
             tools: self.tools,
+            write_tools: self.write_tools,
             workers: self.workers,
+            file_sources: self.file_sources,
+            agents: self.agents,
             spicepods: self.spicepods,
             runtime: self.runtime,
             management: self.management,
@@ -380,7 +404,10 @@ impl AppBuilder {
         let mut embeddings: Vec<Embeddings> = vec![];
         let mut evals: Vec<Eval> = vec![];
         let mut tools: Vec<Tool> = vec![];
+        let mut write_tools: Vec<WriteTool> = vec![];
         let mut workers: Vec<Worker> = vec![];
+        let mut file_sources: Vec<FileSource> = vec![];
+        let mut agents: Vec<Agent> = vec![];
 
         for catalog in &spicepod.catalogs {
             catalogs.push(catalog.clone());
@@ -410,8 +437,20 @@ impl AppBuilder {
             tools.push(tool.clone());
         }
 
+        for write_tool in &spicepod.write_tools {
+            write_tools.push(write_tool.clone());
+        }
+
         for worker in &spicepod.workers {
             workers.push(worker.clone());
+        }
+
+        for file_source in &spicepod.file_sources {
+            file_sources.push(file_source.clone());
+        }
+
+        for agent in &spicepod.agents {
+            agents.push(agent.clone());
         }
 
         let root_spicepod_name = spicepod.name.clone();
@@ -449,8 +488,20 @@ impl AppBuilder {
                 tools.push(tool.clone());
             }
 
+            for write_tool in &dependent_spicepod.write_tools {
+                write_tools.push(write_tool.clone());
+            }
+
             for worker in &dependent_spicepod.workers {
                 workers.push(worker.clone());
+            }
+
+            for file_source in &dependent_spicepod.file_sources {
+                file_sources.push(file_source.clone());
+            }
+
+            for agent in &dependent_spicepod.agents {
+                agents.push(agent.clone());
             }
 
             if dependent_spicepod.runtime != Runtime::default() {
@@ -493,7 +544,10 @@ impl AppBuilder {
             embeddings,
             evals,
             tools,
+            write_tools,
             workers,
+            file_sources,
+            agents,
             spicepods,
             runtime,
             management,

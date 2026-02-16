@@ -1667,6 +1667,7 @@ async fn executor_bind_app(
     rt.load_embeddings().await;
     Arc::clone(rt).load_models().await;
     Arc::clone(rt).load_tools().await;
+    Arc::clone(rt).load_write_tools().await;
     Arc::clone(rt).load_datasets().await;
 
     Ok(())

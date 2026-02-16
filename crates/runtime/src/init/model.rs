@@ -65,6 +65,7 @@ impl Runtime {
 
         // Load tools before loading models.
         Arc::clone(&self).load_tools().await;
+        Arc::clone(&self).load_write_tools().await;
 
         if let Some(app) = app_lock.as_ref() {
             for model in &app.models {

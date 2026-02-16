@@ -31,6 +31,7 @@ members = [
     "crates/runtime-object-store",
     "crates/package",
     "crates/runtime",
+    "crates/runtime-agentic",
     "crates/runtime-api-types",
     "crates/runtime-auth",
     "crates/runtime-async",
@@ -196,6 +197,8 @@ imap = { git = "https://github.com/jonhoo/rust-imap", rev = "6fe22ed11a1ccffe179
 indexmap = "2"
 insta = { version = "1.46.1", features = ["filters"] }
 itertools = "0.14"
+k8s-openapi = { version = "0.24", features = ["latest"] }
+kube = { version = "0.98", default-features = false, features = ["client", "rustls-tls", "runtime"] }
 linkme = "0.3.35"
 logos = "0.16.0"
 mailparse = "0.16.1"

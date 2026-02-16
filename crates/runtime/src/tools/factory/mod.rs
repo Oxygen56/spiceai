@@ -87,7 +87,10 @@ pub async fn register_all_factories(rt: Arc<Runtime>) {
     let mut registry = tool_factories.lock().await;
     registry.insert(
         "builtin".to_string(),
-        ToolFactory::Tool(Arc::new(BuiltinToolCatalog::new(Arc::clone(&rt)))),
+        ToolFactory::Tool(Arc::new(
+            BuiltinToolCatalog::new(Arc::clone(&rt))
+                .with_approval_store(rt.approval_store()),
+        )),
     );
     registry.insert(
         "memory".to_string(),
@@ -107,13 +110,19 @@ pub async fn unregister_all_factories(rt: &Runtime) {
 
     let mut tools = rt.tools.write().await;
     tools.clear();
+
+    let mut write_tools = rt.write_tools.write().await;
+    write_tools.clear();
 }
 
 /// Get all catalogs available by default in the spice runtime.
 #[must_use]
 pub fn default_available_catalogs(rt: Arc<Runtime>) -> Vec<Arc<dyn SpiceToolCatalog>> {
     vec![
-        Arc::new(BuiltinToolCatalog::new(Arc::clone(&rt))),
+        Arc::new(
+            BuiltinToolCatalog::new(Arc::clone(&rt))
+                .with_approval_store(rt.approval_store()),
+        ),
         Arc::new(MemoryToolCatalog::new(rt)),
     ]
 }

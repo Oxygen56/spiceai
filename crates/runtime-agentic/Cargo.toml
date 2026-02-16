@@ -1,0 +1,27 @@
+[package]
+name = "runtime-agentic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+description = "Agentic workflow runtime: workflows, memory, sessions, and triggers"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+croner = "3.0.0"
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+spicepod = { path = "../spicepod" }
+tokio = { workspace = true, features = ["sync", "time"] }
+tokio-util.workspace = true
+tools = { path = "../tools" }
+snafu.workspace = true
+tracing.workspace = true
+tracing-futures.workspace = true
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

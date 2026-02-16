@@ -96,6 +96,7 @@ pub mod embeddings;
 pub mod execution_plan;
 pub mod extension;
 pub mod federated_table;
+pub mod file_source;
 pub mod flight;
 mod http;
 
@@ -107,12 +108,14 @@ mod init;
 pub mod internal_table;
 pub mod jobs;
 mod management;
+pub use runtime_agentic::memory;
 mod metrics;
 pub mod metrics_reader;
 mod metrics_server;
 pub mod model;
 mod opentelemetry;
 pub mod otel_push_exporter;
+pub use runtime_agentic::workflow as pipeline;
 pub mod resource_monitor;
 
 pub use runtime_parameters as parameters;
@@ -121,6 +124,7 @@ pub mod podswatcher;
 pub mod request;
 mod scheduling;
 pub mod search;
+pub use runtime_agentic::session;
 pub mod secrets {
     pub use runtime_secrets::*;
 }
@@ -133,6 +137,7 @@ pub mod tls;
 pub mod token_providers;
 pub mod tools;
 pub mod topological_ordering;
+pub use runtime_agentic::trigger;
 pub(crate) mod tracers;
 mod tracing_util;
 mod udtfs;
@@ -478,6 +483,7 @@ pub struct Runtime {
     embeds: Arc<RwLock<EmbeddingModelStore>>,
     workers: WorkerRegistry,
     tools: Arc<RwLock<HashMap<String, Tooling>>>,
+    write_tools: Arc<RwLock<HashMap<String, Tooling>>>,
     tool_factories: Arc<Mutex<HashMap<String, ToolFactory>>>,
     evals: Arc<RwLock<Vec<Eval>>>,
     eval_scorers: EvalScorerRegistry,
@@ -508,6 +514,9 @@ pub struct Runtime {
     resource_monitor: resource_monitor::ResourceMonitor,
 
     config: Arc<Config>,
+    agents: Arc<RwLock<HashMap<String, init::agent::LoadedAgent>>>,
+    webhook_registry: init::agent::WebhookRegistry,
+    approval_store: tools::builtin::approval::store::ApprovalStore,
 }
 
 impl Debug for Runtime {
@@ -574,6 +583,11 @@ impl Runtime {
     }
 
     #[must_use]
+    pub fn write_tools(&self) -> Arc<RwLock<HashMap<String, Tooling>>> {
+        Arc::clone(&self.write_tools)
+    }
+
+    #[must_use]
     pub fn accelerator_engine_registry(&self) -> Arc<AcceleratorEngineRegistry> {
         Arc::clone(&self.accelerator_engine_registry)
     }
@@ -591,6 +605,21 @@ impl Runtime {
     #[must_use]
     pub fn schedulers(&self) -> Arc<ScheduleRegistry> {
         Arc::clone(&self.schedulers)
+    }
+
+    #[must_use]
+    pub fn agents(&self) -> Arc<RwLock<HashMap<String, init::agent::LoadedAgent>>> {
+        Arc::clone(&self.agents)
+    }
+
+    #[must_use]
+    pub fn webhook_registry(&self) -> init::agent::WebhookRegistry {
+        Arc::clone(&self.webhook_registry)
+    }
+
+    #[must_use]
+    pub fn approval_store(&self) -> tools::builtin::approval::store::ApprovalStore {
+        self.approval_store.clone()
     }
 
     #[must_use]
@@ -1247,6 +1276,7 @@ impl Runtime {
                 #[cfg(feature = "models")]
                 {
                     Arc::clone(&self_clone).load_workers().await;
+                    Arc::clone(&self_clone).load_agents().await;
                     let an_eval_exists = app_lock.as_ref().is_some_and(|app| !app.evals.is_empty());
                     if an_eval_exists {
                         let () = self_clone.verify_evals().await;
@@ -1261,6 +1291,13 @@ impl Runtime {
                         );
                     }
                 }
+            }
+        });
+
+        let file_sources = tokio::spawn({
+            let self_clone = Arc::clone(&self);
+            async move {
+                self_clone.load_file_sources().await;
             }
         });
 
@@ -1281,7 +1318,7 @@ impl Runtime {
             Arc::new(ListUDFTableFunc::new(Arc::clone(ctx))),
         );
 
-        let components = vec![task_history, datasets, catalogs, models_and_evals];
+        let components = vec![task_history, datasets, catalogs, models_and_evals, file_sources];
 
         // Signal that the load must be canceled if the runtime is shut down before the components are loaded
         let cancel_loading = CancellationToken::new();

@@ -27,19 +27,25 @@ use snafu::prelude::*;
 
 use crate::reader;
 pub mod access;
+pub mod agent;
 pub mod caching;
 pub mod catalog;
 pub mod dataset;
 pub mod embeddings;
 pub mod eval;
+pub mod file_source;
 pub mod management;
+pub mod memory;
 pub mod model;
+pub mod pipeline;
 pub mod runtime;
 pub mod secret;
+pub mod session;
 pub mod snapshot;
 pub mod tool;
 pub mod view;
 pub mod worker;
+pub mod write_tool;
 
 pub trait Nameable {
     fn name(&self) -> &str;

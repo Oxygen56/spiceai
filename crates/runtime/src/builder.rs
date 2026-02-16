@@ -317,6 +317,7 @@ impl RuntimeBuilder {
             evals: Arc::new(RwLock::new(evals)),
             eval_scorers: Arc::new(RwLock::new(HashMap::new())),
             tools: Arc::new(RwLock::new(HashMap::new())),
+            write_tools: Arc::new(RwLock::new(HashMap::new())),
             tool_factories: Arc::new(Mutex::new(HashMap::new())),
             pods_watcher: Arc::new(RwLock::new(self.pods_watcher)),
             secrets: Arc::new(RwLock::new(secrets)),
@@ -337,6 +338,9 @@ impl RuntimeBuilder {
             distributed,
             resource_monitor,
             config: Arc::clone(&self.runtime_config),
+            agents: Arc::new(RwLock::new(HashMap::new())),
+            webhook_registry: Arc::new(RwLock::new(HashMap::new())),
+            approval_store: crate::tools::builtin::approval::store::ApprovalStore::default(),
         };
 
         let mut extensions: HashMap<String, Arc<dyn Extension>> = HashMap::new();

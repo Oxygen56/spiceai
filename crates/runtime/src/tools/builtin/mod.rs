@@ -15,11 +15,25 @@ limitations under the License.
 */
 use super::SpiceModelTool;
 
+pub mod approval;
 pub mod catalog;
+pub mod claude_code;
+pub mod debug;
+pub mod fail;
 pub mod get_readiness;
+pub mod git;
+pub mod github;
+pub mod git_worktree;
+pub mod grep;
+pub mod kubectl;
 pub mod list_datasets;
+pub mod list_file_sources;
+pub mod list_files;
+pub mod ms_teams;
+pub mod read_file;
 pub mod sample;
 pub mod search;
+pub mod slack;
 pub mod sql;
 pub mod table_schema;
 pub mod web_search;

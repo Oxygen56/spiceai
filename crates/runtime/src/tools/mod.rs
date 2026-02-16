@@ -64,6 +64,15 @@ impl Tooling {
             Tooling::Catalog(c) => Cow::Borrowed(c.name()),
         }
     }
+
+    /// Returns the inner tool if this is an individual tool (not a catalog).
+    #[must_use]
+    pub fn as_individual(&self) -> Option<&Arc<dyn SpiceModelTool>> {
+        match self {
+            Tooling::Tool(t) => Some(t),
+            Tooling::Catalog(_) => None,
+        }
+    }
 }
 
 impl From<Arc<dyn SpiceModelTool>> for Tooling {

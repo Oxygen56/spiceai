@@ -21,15 +21,18 @@ use serde_json::Value;
 use std::fmt::{self, Display, Formatter};
 use std::{collections::HashMap, fmt::Debug};
 
+use crate::component::agent::Agent;
 use crate::component::catalog::Catalog;
 use crate::component::embeddings::Embeddings;
 use crate::component::eval::Eval;
+use crate::component::file_source::FileSource;
 use crate::component::is_default;
 use crate::component::management::Management;
 use crate::component::runtime::Runtime;
 use crate::component::secret::Secret;
 use crate::component::snapshot::Snapshots;
 use crate::component::tool::Tool;
+use crate::component::write_tool::WriteTool;
 use crate::component::{
     ComponentOrReference, dataset::Dataset, model::Model, view::View, worker::Worker,
 };
@@ -123,6 +126,18 @@ pub struct SpicepodDefinition {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
     pub tools: Vec<ComponentOrReference<Tool>>,
+
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    pub write_tools: Vec<ComponentOrReference<WriteTool>>,
+
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    pub file_sources: Vec<ComponentOrReference<FileSource>>,
+
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    pub agents: Vec<ComponentOrReference<Agent>>,
 
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]

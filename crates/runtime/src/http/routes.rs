@@ -299,6 +299,46 @@ pub(crate) fn routes(
             .layer(Extension(Arc::clone(&rt.responses_llms)));
     }
 
+    // Add agent webhook routes
+    {
+        let agents_router = Router::new()
+            .route(
+                "/v1/agents/webhooks",
+                get(v1::agents::list_webhooks),
+            )
+            .route(
+                "/v1/agents/webhooks/{*path}",
+                post(v1::agents::webhook),
+            )
+            .layer(Extension(rt.webhook_registry()));
+
+        authenticated_router = authenticated_router.merge(agents_router);
+    }
+
+    // Add approval routes
+    {
+        let approval_router = Router::new()
+            .route(
+                "/v1/agents/approvals",
+                get(v1::agents::list_approvals),
+            )
+            .route(
+                "/v1/agents/approvals/{approval_id}",
+                post(v1::agents::resolve_approval),
+            )
+            .route(
+                "/v1/agents/approvals/{approval_id}/approve",
+                get(v1::agents::approve_action),
+            )
+            .route(
+                "/v1/agents/approvals/{approval_id}/reject",
+                get(v1::agents::reject_action),
+            )
+            .layer(Extension(rt.approval_store()));
+
+        authenticated_router = authenticated_router.merge(approval_router);
+    }
+
     // Add async queries API routes - registered unconditionally for discoverability and consistency.
     // Handlers check at runtime if cluster mode with scheduler role is enabled.
     // This design ensures:

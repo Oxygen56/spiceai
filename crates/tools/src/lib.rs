@@ -26,6 +26,13 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::borrow::Cow;
 
+/// Controls whether a tool operates in read-only or read-write mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCapability {
+    ReadOnly,
+    ReadWrite,
+}
+
 /// Tools that implement the [`SpiceModelTool`] trait can automatically be used by LLMs in the runtime.
 #[async_trait]
 pub trait SpiceModelTool: Sync + Send {

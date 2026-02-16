@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spice.ai Agent Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f5f5f5; color: #333; padding: 24px;
+      max-width: 960px; margin: 0 auto;
+    }
+
+    /* Header */
+    .header { margin-bottom: 20px; padding-bottom: 16px; border-bottom: 2px solid #e0e0e0; }
+    .header-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .header h1 { font-size: 1.4rem; color: #1a1a1a; }
+    .status { font-size: 0.8rem; padding: 4px 10px; border-radius: 12px; }
+    .status.ok { background: #e8f5e9; color: #2e7d32; }
+    .status.err { background: #ffebee; color: #c62828; }
+    .config-row { display: flex; align-items: center; gap: 8px; }
+    .config-row label { font-size: 0.85rem; color: #666; }
+    .config-row input {
+      flex: 1; max-width: 320px; padding: 5px 10px;
+      border: 1px solid #ccc; border-radius: 4px; font-size: 0.85rem;
+      font-family: monospace;
+    }
+
+    /* Sections */
+    .section {
+      background: #fff; border-radius: 8px; padding: 20px;
+      margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .section-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 14px;
+    }
+    .section-header h2 { font-size: 1.1rem; }
+    .section-header .info { font-size: 0.75rem; color: #999; }
+
+    /* Table */
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }
+    th { font-weight: 600; font-size: 0.85rem; color: #666; background: #fafafa; }
+    td code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.85rem; }
+
+    /* Trigger form */
+    .trigger-form {
+      display: none; padding: 12px; background: #fafafa;
+      border: 1px solid #e0e0e0; border-radius: 4px; margin-top: 8px;
+    }
+    .trigger-form.active { display: block; }
+    .trigger-form textarea {
+      width: 100%; height: 80px; font-family: monospace; font-size: 0.85rem;
+      padding: 8px; border: 1px solid #ccc; border-radius: 4px; resize: vertical;
+    }
+    .trigger-form .form-actions { margin-top: 8px; display: flex; gap: 8px; }
+
+    /* Approval cards */
+    .approval-card {
+      border: 1px solid #e0e0e0; border-radius: 6px; padding: 16px;
+      margin-bottom: 12px; transition: border-color 0.2s;
+    }
+    .approval-card:hover { border-color: #bbb; }
+    .approval-meta { font-size: 0.8rem; color: #888; margin-bottom: 6px; }
+    .approval-message { font-weight: 500; margin-bottom: 8px; line-height: 1.4; }
+    .approval-context {
+      background: #f5f5f5; padding: 10px; border-radius: 4px;
+      font-size: 0.82rem; font-family: monospace; white-space: pre-wrap;
+      margin-bottom: 12px; max-height: 200px; overflow-y: auto;
+    }
+    .approval-actions { display: flex; gap: 8px; align-items: center; }
+    .approval-actions input[type="text"] {
+      flex: 1; padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px;
+      font-size: 0.85rem;
+    }
+
+    /* Buttons */
+    .btn {
+      padding: 6px 16px; border: none; border-radius: 4px; cursor: pointer;
+      font-size: 0.85rem; font-weight: 500; transition: opacity 0.15s;
+    }
+    .btn:hover:not(:disabled) { opacity: 0.8; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: #1976d2; color: #fff; }
+    .btn-success { background: #388e3c; color: #fff; }
+    .btn-danger { background: #d32f2f; color: #fff; }
+    .btn-secondary { background: #e0e0e0; color: #333; }
+    .btn-sm { padding: 4px 12px; font-size: 0.8rem; }
+
+    /* Notifications */
+    .notification {
+      padding: 10px 16px; border-radius: 4px; margin-bottom: 12px;
+      font-size: 0.85rem; display: none; position: relative;
+    }
+    .notification.success { display: block; background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+    .notification.error { display: block; background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; }
+
+    /* Empty state */
+    .empty { text-align: center; padding: 24px; color: #999; font-style: italic; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="header-top">
+      <h1>Spice.ai Agent Dashboard</h1>
+      <span id="status" class="status ok">Connected</span>
+    </div>
+    <div class="config-row">
+      <label for="base-url">Runtime URL:</label>
+      <input type="text" id="base-url" value="http://localhost:8090"
+             onchange="saveBaseUrl()" placeholder="http://localhost:8090">
+      <button class="btn btn-secondary btn-sm" onclick="saveBaseUrl(); loadAll();">Connect</button>
+    </div>
+  </div>
+
+  <div id="notification" class="notification"></div>
+
+  <!-- Webhooks -->
+  <div class="section">
+    <div class="section-header">
+      <h2>Webhook Endpoints</h2>
+      <button class="btn btn-secondary btn-sm" onclick="loadWebhooks()">Refresh</button>
+    </div>
+    <div id="webhooks-content">
+      <div class="empty">Loading webhooks...</div>
+    </div>
+  </div>
+
+  <!-- Approvals -->
+  <div class="section">
+    <div class="section-header">
+      <h2>Pending Approvals</h2>
+      <span class="info" id="poll-info">Auto-refresh: 5s</span>
+    </div>
+    <div id="approvals-content">
+      <div class="empty">Loading approvals...</div>
+    </div>
+  </div>
+
+<script>
+  // --- Config ---
+  const POLL_INTERVAL = 5000;
+  let pollTimer = null;
+  let errorCount = 0;
+
+  function getBaseUrl() {
+    return document.getElementById('base-url').value.replace(/\/+$/, '');
+  }
+
+  function saveBaseUrl() {
+    localStorage.setItem('spice-dashboard-url', getBaseUrl());
+  }
+
+  function loadBaseUrl() {
+    const saved = localStorage.getItem('spice-dashboard-url');
+    if (saved) document.getElementById('base-url').value = saved;
+  }
+
+  // --- Notifications ---
+  function notify(msg, type) {
+    const el = document.getElementById('notification');
+    el.textContent = msg;
+    el.className = 'notification ' + type;
+    setTimeout(() => { el.className = 'notification'; }, 5000);
+  }
+
+  // --- Fetch wrapper ---
+  async function apiFetch(path, opts = {}) {
+    const url = getBaseUrl() + path;
+    try {
+      const resp = await fetch(url, { ...opts });
+      if (!resp.ok) {
+        const body = await resp.text();
+        throw new Error(body || resp.statusText);
+      }
+      errorCount = 0;
+      setStatus(true);
+      return resp;
+    } catch (err) {
+      errorCount++;
+      if (errorCount >= 2) setStatus(false);
+      throw err;
+    }
+  }
+
+  function setStatus(ok) {
+    const el = document.getElementById('status');
+    el.textContent = ok ? 'Connected' : 'Disconnected';
+    el.className = 'status ' + (ok ? 'ok' : 'err');
+  }
+
+  // --- Webhooks ---
+  async function loadWebhooks() {
+    try {
+      const resp = await apiFetch('/v1/agents/webhooks');
+      const data = await resp.json();
+      const container = document.getElementById('webhooks-content');
+      const webhooks = data.webhooks || [];
+
+      if (webhooks.length === 0) {
+        container.innerHTML = '<div class="empty">No webhook endpoints registered.</div>';
+        return;
+      }
+
+      let html = '<table><thead><tr><th>Path</th><th style="width:100px">Action</th></tr></thead><tbody>';
+      webhooks.forEach((path, i) => {
+        const safePath = esc(path);
+        html += '<tr>' +
+          '<td><code>' + safePath + '</code></td>' +
+          '<td><button class="btn btn-primary btn-sm" onclick="toggleTrigger(' + i + ')">Trigger</button></td>' +
+          '</tr>' +
+          '<tr><td colspan="2">' +
+          '<div id="tf-' + i + '" class="trigger-form">' +
+          '<textarea id="tp-' + i + '" placeholder=\'{"key": "value"}\'>{}</textarea>' +
+          '<div class="form-actions">' +
+          '<button class="btn btn-success btn-sm" onclick="triggerWebhook(\'' + escAttr(path) + '\',' + i + ')">Send</button>' +
+          '<button class="btn btn-secondary btn-sm" onclick="toggleTrigger(' + i + ')">Cancel</button>' +
+          '</div></div>' +
+          '</td></tr>';
+      });
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    } catch (err) {
+      notify('Failed to load webhooks: ' + err.message, 'error');
+    }
+  }
+
+  function toggleTrigger(i) {
+    document.getElementById('tf-' + i).classList.toggle('active');
+  }
+
+  async function triggerWebhook(path, i) {
+    const raw = document.getElementById('tp-' + i).value;
+    let payload;
+    try { payload = JSON.parse(raw); }
+    catch (e) { notify('Invalid JSON: ' + e.message, 'error'); return; }
+
+    try {
+      await apiFetch('/v1/agents/webhooks' + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      notify('Webhook triggered: ' + path, 'success');
+      toggleTrigger(i);
+    } catch (err) {
+      notify('Trigger failed: ' + err.message, 'error');
+    }
+  }
+
+  // --- Approvals ---
+  async function loadApprovals() {
+    try {
+      const resp = await apiFetch('/v1/agents/approvals');
+      const data = await resp.json();
+      const container = document.getElementById('approvals-content');
+      const approvals = data.approvals || [];
+
+      if (approvals.length === 0) {
+        container.innerHTML = '<div class="empty">No pending approvals.</div>';
+        return;
+      }
+
+      let html = '';
+      approvals.forEach(a => {
+        const id = esc(a.id);
+        const safeId = escAttr(a.id);
+        html += '<div class="approval-card">' +
+          '<div class="approval-meta">' +
+            '<strong>' + esc(a.agent_name) + '</strong> &middot; ' +
+            '<code>' + id + '</code> &middot; ' +
+            timeAgo(a.created_at) +
+          '</div>' +
+          '<div class="approval-message">' + esc(a.message) + '</div>' +
+          (a.context ? '<div class="approval-context">' + esc(a.context) + '</div>' : '') +
+          '<div class="approval-actions">' +
+            '<input type="text" id="cmt-' + safeId + '" placeholder="Optional comment...">' +
+            '<button class="btn btn-success btn-sm" onclick="resolveApproval(\'' + safeId + '\',true)">Approve</button>' +
+            '<button class="btn btn-danger btn-sm" onclick="resolveApproval(\'' + safeId + '\',false)">Reject</button>' +
+          '</div>' +
+          '</div>';
+      });
+      container.innerHTML = html;
+    } catch (_) {
+      // Silent on poll — status indicator updates via apiFetch
+    }
+  }
+
+  async function resolveApproval(id, approved) {
+    const cmtEl = document.getElementById('cmt-' + id);
+    const comment = cmtEl ? cmtEl.value.trim() : '';
+    const body = { approved };
+    if (comment) body.comment = comment;
+
+    try {
+      await apiFetch('/v1/agents/approvals/' + encodeURIComponent(id), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      notify('Approval ' + id.substring(0, 8) + '... ' + (approved ? 'approved' : 'rejected'), 'success');
+      loadApprovals();
+    } catch (err) {
+      notify('Failed to resolve approval: ' + err.message, 'error');
+    }
+  }
+
+  // --- Utilities ---
+  function esc(str) {
+    const d = document.createElement('div');
+    d.textContent = str || '';
+    return d.innerHTML;
+  }
+
+  function escAttr(str) {
+    return (str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  }
+
+  function timeAgo(dateStr) {
+    if (!dateStr) return '';
+    const now = Date.now();
+    const then = new Date(dateStr).getTime();
+    const diff = Math.max(0, now - then);
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) return sec + 's ago';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return min + 'm ago';
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return hr + 'h ago';
+    return Math.floor(hr / 24) + 'd ago';
+  }
+
+  function loadAll() {
+    loadWebhooks();
+    loadApprovals();
+  }
+
+  // --- Init ---
+  loadBaseUrl();
+  loadAll();
+  pollTimer = setInterval(loadApprovals, POLL_INTERVAL);
+</script>
+
+</body>
+</html>

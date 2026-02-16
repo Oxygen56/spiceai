@@ -28,7 +28,7 @@ mod model_context;
 pub mod params;
 pub(crate) mod provider_models;
 mod responses;
-mod tool_use;
+pub(crate) mod tool_use;
 mod tool_use_responses;
 mod util;
 mod wrapper;
