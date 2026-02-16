@@ -24,6 +24,7 @@ use tools::{SpiceModelTool, ToolCapability};
 use tracing::Span;
 use tracing_futures::Instrument;
 
+use crate::tools::builtin::git_worktree::WorktreeTracker;
 use crate::tools::utils::parameters;
 
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
@@ -42,6 +43,9 @@ pub struct GitToolParams {
     remote: Option<String>,
     /// Additional CLI arguments.
     args: Option<Vec<String>>,
+    /// Optional worktree name to resolve from WorktreeTracker.
+    /// When provided, operations execute in the worktree instead of repo_path.
+    worktree_name: Option<String>,
 }
 
 const READ_OPERATIONS: &[&str] = &["status", "log", "diff"];
@@ -54,6 +58,7 @@ pub struct GitTool {
     repo_path: PathBuf,
     capability: ToolCapability,
     allowed_operations: Vec<String>,
+    worktree_tracker: Option<WorktreeTracker>,
 }
 
 impl GitTool {
@@ -68,6 +73,7 @@ impl GitTool {
         repo_path: PathBuf,
         capability: ToolCapability,
         allowed_operations: Vec<String>,
+        worktree_tracker: Option<WorktreeTracker>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         if !repo_path.exists() {
             return Err(
@@ -88,6 +94,7 @@ impl GitTool {
             repo_path,
             capability,
             allowed_operations,
+            worktree_tracker,
         })
     }
 
@@ -183,35 +190,54 @@ impl GitTool {
         Ok(())
     }
 
-    /// Determine the working directory for the command. If a `working_directory` is specified
-    /// in the request, validate it is within `repo_path`.
+    /// Determine the working directory for the command. Three resolution strategies:
+    /// 1. worktree_name: Look up in WorktreeTracker and use worktree path
+    /// 2. working_directory: Validate it's within repo_path and use it
+    /// 3. Default: Use repo_path
     fn resolve_working_directory(
         &self,
-        working_directory: Option<&str>,
+        req: &GitToolParams,
     ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-        let work_dir = match working_directory {
-            Some(wd) => {
-                let wd_path = Path::new(wd);
-                if !wd_path.exists() {
-                    return Err(
-                        format!("working_directory '{wd}' does not exist").into()
+        // Priority 1: worktree_name lookup
+        if let Some(wt_name) = &req.worktree_name {
+            if let Some(tracker) = &self.worktree_tracker {
+                if let Some(tracked_wt) = tracker.get(wt_name) {
+                    tracing::debug!(
+                        target: "task_history",
+                        worktree_name = %wt_name,
+                        worktree_path = %tracked_wt.path.display(),
+                        "Resolved worktree from tracker"
                     );
+                    return Ok(tracked_wt.path);
                 }
-                let canonical_wd = wd_path.canonicalize()?;
-                let canonical_repo = self.repo_path.canonicalize()?;
-                if !canonical_wd.starts_with(&canonical_repo) {
-                    return Err(format!(
-                        "working_directory '{}' is outside the configured repo_path '{}'",
-                        wd,
-                        self.repo_path.display()
-                    )
-                    .into());
-                }
-                canonical_wd
+                tracing::warn!(
+                    worktree_name = %wt_name,
+                    "Worktree not found in tracker, falling back to repo_path"
+                );
             }
-            None => self.repo_path.clone(),
-        };
-        Ok(work_dir)
+        }
+
+        // Priority 2: working_directory parameter (must be within repo_path)
+        if let Some(wd) = &req.working_directory {
+            let wd_path = Path::new(wd);
+            if !wd_path.exists() {
+                return Err(format!("working_directory '{wd}' does not exist").into());
+            }
+            let canonical_wd = wd_path.canonicalize()?;
+            let canonical_repo = self.repo_path.canonicalize()?;
+            if !canonical_wd.starts_with(&canonical_repo) {
+                return Err(format!(
+                    "working_directory '{}' is outside the configured repo_path '{}'",
+                    wd,
+                    self.repo_path.display()
+                )
+                .into());
+            }
+            return Ok(canonical_wd);
+        }
+
+        // Priority 3: repo_path default
+        Ok(self.repo_path.clone())
     }
 
     /// Build a `tokio::process::Command` for the given operation.
@@ -331,7 +357,7 @@ impl SpiceModelTool for GitTool {
 
             self.validate_request(&req)?;
 
-            let work_dir = self.resolve_working_directory(req.working_directory.as_deref())?;
+            let work_dir = self.resolve_working_directory(&req)?;
             let mut cmd = self.build_command(&req, &work_dir)?;
 
             let output = cmd.output().await?;
@@ -377,6 +403,7 @@ mod tests {
             repo_path,
             capability,
             ops.into_iter().map(ToString::to_string).collect(),
+            None,
         )
         .expect("temp_dir should exist")
     }
@@ -395,6 +422,7 @@ mod tests {
             branch: None,
             remote: None,
             args: None,
+            worktree_name: None,
         };
         let result = tool.validate_request(&req);
         assert!(result.is_err());
@@ -421,6 +449,7 @@ mod tests {
             branch: None,
             remote: None,
             args: None,
+            worktree_name: None,
         };
         let result = tool.validate_request(&req);
         assert!(result.is_err());
@@ -449,6 +478,7 @@ mod tests {
             branch: Some("main".to_string()),
             remote: Some("origin".to_string()),
             args: Some(vec!["--force".to_string()]),
+            worktree_name: None,
         };
         let result = tool.validate_request(&req);
         assert!(result.is_err());
@@ -469,6 +499,7 @@ mod tests {
             branch: Some("main".to_string()),
             remote: Some("origin".to_string()),
             args: Some(vec!["-f".to_string()]),
+            worktree_name: None,
         };
         let result_short = tool.validate_request(&req_short);
         assert!(result_short.is_err());
@@ -495,6 +526,7 @@ mod tests {
             branch: None,
             remote: None,
             args: None,
+            worktree_name: None,
         };
         let result = tool.validate_request(&req);
         assert!(result.is_err());
@@ -523,6 +555,7 @@ mod tests {
             branch: None,
             remote: None,
             args: None,
+            worktree_name: None,
         };
         let result = tool.validate_request(&req);
         assert!(result.is_err());
@@ -542,6 +575,7 @@ mod tests {
             branch: None,
             remote: None,
             args: None,
+            worktree_name: None,
         };
         let result_empty = tool.validate_request(&req_empty);
         assert!(result_empty.is_err());
@@ -567,6 +601,7 @@ mod tests {
             branch: None,
             remote: None,
             args: None,
+            worktree_name: None,
         };
         let result = tool.validate_request(&req);
         assert!(result.is_err());
@@ -592,6 +627,7 @@ mod tests {
             branch: None,
             remote: None,
             args: None,
+            worktree_name: None,
         };
         assert!(tool.validate_request(&req).is_ok());
     }
@@ -611,6 +647,7 @@ mod tests {
             branch: None,
             remote: None,
             args: None,
+            worktree_name: None,
         };
         assert!(tool.validate_request(&req).is_ok());
 
@@ -622,6 +659,7 @@ mod tests {
             branch: Some("main".to_string()),
             remote: Some("origin".to_string()),
             args: None,
+            worktree_name: None,
         };
         assert!(tool.validate_request(&req_push).is_ok());
 
@@ -633,6 +671,7 @@ mod tests {
             branch: None,
             remote: None,
             args: None,
+            worktree_name: None,
         };
         assert!(tool.validate_request(&req_cp).is_ok());
     }
@@ -645,6 +684,7 @@ mod tests {
             PathBuf::from("/nonexistent/path/to/repo"),
             ToolCapability::ReadWrite,
             vec!["status".to_string()],
+            None,
         );
         assert!(result.is_err());
         assert!(

@@ -29,11 +29,27 @@ pub fn resolve_workflow(
     available_read_tools: &HashMap<String, Arc<dyn SpiceModelTool>>,
     available_write_tools: &HashMap<String, Arc<dyn SpiceModelTool>>,
 ) -> Result<ResolvedWorkflow, Box<dyn std::error::Error + Send + Sync>> {
+    let mut missing_tools = Vec::new();
     let agent_read_tools: Vec<Arc<dyn SpiceModelTool>> = agent
         .read_tools
         .iter()
-        .filter_map(|name| available_read_tools.get(name).cloned())
+        .filter_map(|name| match available_read_tools.get(name) {
+            Some(tool) => Some(tool.clone()),
+            None => {
+                missing_tools.push(name.clone());
+                None
+            }
+        })
         .collect();
+
+    if !missing_tools.is_empty() {
+        return Err(format!(
+            "Agent '{}' references unavailable read tools: [{}]",
+            agent.name,
+            missing_tools.join(", ")
+        )
+        .into());
+    }
 
     let steps = pipeline_config
         .steps
@@ -64,21 +80,68 @@ fn resolve_step(
 
     let (read_tools, required_write, optional_write) = match &step.tools {
         Some(StepTools::Simple(names)) => {
+            let mut missing = Vec::new();
             let tools = names
                 .iter()
-                .filter_map(|n| available_read_tools.get(n).cloned())
+                .filter_map(|n| match available_read_tools.get(n) {
+                    Some(tool) => Some(tool.clone()),
+                    None => {
+                        missing.push(n.clone());
+                        None
+                    }
+                })
                 .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "Step '{}' references unavailable read tools: [{}]",
+                    step.name,
+                    missing.join(", ")
+                )
+                .into());
+            }
             (tools, vec![], vec![])
         }
         Some(StepTools::Structured { required, optional }) => {
+            let mut missing = Vec::new();
             let req = required
                 .iter()
-                .filter_map(|n| available_write_tools.get(n).cloned())
+                .filter_map(|n| match available_write_tools.get(n) {
+                    Some(tool) => Some(tool.clone()),
+                    None => {
+                        missing.push(n.clone());
+                        None
+                    }
+                })
                 .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "Step '{}' references unavailable required write tools: [{}]",
+                    step.name,
+                    missing.join(", ")
+                )
+                .into());
+            }
+
+            let mut missing_opt = Vec::new();
             let opt = optional
                 .iter()
-                .filter_map(|n| available_write_tools.get(n).cloned())
+                .filter_map(|n| match available_write_tools.get(n) {
+                    Some(tool) => Some(tool.clone()),
+                    None => {
+                        missing_opt.push(n.clone());
+                        None
+                    }
+                })
                 .collect();
+            if !missing_opt.is_empty() {
+                return Err(format!(
+                    "Step '{}' references unavailable optional write tools: [{}]",
+                    step.name,
+                    missing_opt.join(", ")
+                )
+                .into());
+            }
+
             (vec![], req, opt)
         }
         None => (vec![], vec![], vec![]),

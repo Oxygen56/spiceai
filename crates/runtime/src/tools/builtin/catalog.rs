@@ -544,6 +544,7 @@ impl BuiltinToolCatalog {
                         repo_path,
                         capability,
                         allowed_operations,
+                        Some(self.worktree_tracker.clone()),
                     )
                     .context(FailedToConstructToolSnafu { id: id.to_string() })?,
                 ))

@@ -66,14 +66,6 @@ impl GitWorktreeTool {
         worktree_root: PathBuf,
         tracker: WorktreeTracker,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // Validate that repo_path is actually a git repository.
-        git2::Repository::open(&repo_path).map_err(|e| {
-            format!(
-                "Failed to open git repository at '{}': {e}",
-                repo_path.display()
-            )
-        })?;
-
         // Create the worktree root directory if it doesn't exist.
         if !worktree_root.exists() {
             std::fs::create_dir_all(&worktree_root).map_err(|e| {
@@ -262,6 +254,14 @@ impl SpiceModelTool for GitWorktreeTool {
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        // Validate that repo_path is actually a git repository.
+        git2::Repository::open(&self.repo_path).map_err(|e| {
+            format!(
+                "Failed to open git repository at '{}': {e}",
+                self.repo_path.display()
+            )
+        })?;
+
         let span: Span = tracing::span!(target: "task_history", tracing::Level::INFO, "tool_use::git_worktree", tool = self.name().to_string(), input = arg);
 
         let tool_use_result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {

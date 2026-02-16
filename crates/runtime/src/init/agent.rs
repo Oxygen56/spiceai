@@ -194,6 +194,12 @@ impl RuntimeModelCaller {
         let mut tools_called = HashSet::new();
 
         for iteration in 0..max_iterations {
+            tracing::debug!(
+                target: "task_history",
+                iteration = iteration,
+                "Starting tool iteration"
+            );
+
             let iter_span = tracing::info_span!(
                 target: "task_history",
                 "tool_iteration",
@@ -222,8 +228,24 @@ impl RuntimeModelCaller {
                         .first()
                         .and_then(|ChatChoice { message, .. }| message.content.clone())
                         .unwrap_or_default();
+                    tracing::debug!(
+                        target: "task_history",
+                        "Model returned final response without tool calls"
+                    );
                     return Ok(IterationOutcome::Done(content, HashSet::new()));
                 }
+
+                let tool_names: Vec<String> = step_tool_calls
+                    .iter()
+                    .filter_map(|tc| Self::find_tool(all_step_tools, &tc.function.name))
+                    .map(|t| t.name().to_string())
+                    .collect();
+                tracing::debug!(
+                    target: "task_history",
+                    count = step_tool_calls.len(),
+                    tools = ?tool_names,
+                    "Model called step tools"
+                );
 
                 // Execute the step tools and build messages for the next round
                 let assistant_message: ChatCompletionRequestMessage =
@@ -269,10 +291,17 @@ impl RuntimeModelCaller {
                                 args = %tool_call.function.arguments,
                                 "Executing step tool"
                             );
-                            match tool.call(&tool_call.function.arguments).await {
+                            let result = match tool.call(&tool_call.function.arguments).await {
                                 Ok(v) => v.to_string(),
                                 Err(e) => format!("Tool error: {e}"),
-                            }
+                            };
+                            tracing::debug!(
+                                target: "task_history",
+                                tool = %tool.name(),
+                                result_length = result.len(),
+                                "Tool execution completed"
+                            );
+                            result
                         } else {
                             "Unknown tool".to_string()
                         };
@@ -294,7 +323,13 @@ impl RuntimeModelCaller {
             match iter_result? {
                 IterationOutcome::Done(content, _) => return Ok((content, tools_called)),
                 IterationOutcome::Continue(iter_tools) => {
+                    let count = iter_tools.len();
                     tools_called.extend(iter_tools);
+                    tracing::debug!(
+                        target: "task_history",
+                        tools_called = count,
+                        "Iteration completed, continuing loop"
+                    );
                 }
             }
         }

@@ -286,16 +286,39 @@ impl GitHubTool {
         let milestone_str = milestone_number.to_string();
         let path = format!("/repos/{}/{}/issues", self.owner, self.repo);
 
-        self.api_get(
-            &path,
-            &[
-                ("milestone", &milestone_str),
-                ("state", "all"),
-                ("per_page", &per_page),
-                ("page", &page),
-            ],
-        )
-        .await
+        let raw = self
+            .api_get(
+                &path,
+                &[
+                    ("milestone", &milestone_str),
+                    ("state", "all"),
+                    ("per_page", &per_page),
+                    ("page", &page),
+                ],
+            )
+            .await?;
+
+        // Return only number, title, and merge commit SHA for each issue/PR.
+        let items = raw
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|issue| {
+                        let commit = issue
+                            .get("pull_request")
+                            .and_then(|pr| pr.get("merge_commit_sha"))
+                            .and_then(|v| v.as_str());
+                        json!({
+                            "number": issue.get("number"),
+                            "title": issue.get("title"),
+                            "commit": commit,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Ok(json!(items))
     }
 
     async fn handle_list_commits(
@@ -400,7 +423,7 @@ impl GitHubTool {
     ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         let path = format!("/repos/{}/{}/milestones", self.owner, self.repo);
         let milestones = self
-            .api_get(&path, &[("state", "open"), ("per_page", "100")])
+            .api_get(&path, &[("state", "closed"), ("per_page", "100")])
             .await?;
 
         let milestones = milestones

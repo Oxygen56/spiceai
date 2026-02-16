@@ -44,6 +44,12 @@ impl WorktreeTracker {
         map.remove(name)
     }
 
+    /// Get a worktree by name without removing it from the tracker.
+    pub fn get(&self, name: &str) -> Option<TrackedWorktree> {
+        let map = self.inner.lock().expect("WorktreeTracker lock poisoned");
+        map.get(name).cloned()
+    }
+
     pub fn drain(&self) -> HashMap<String, TrackedWorktree> {
         let mut map = self.inner.lock().expect("WorktreeTracker lock poisoned");
         std::mem::take(&mut *map)
