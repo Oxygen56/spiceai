@@ -22,6 +22,7 @@ use tools::{SpiceModelTool, rename::with_name};
 pub mod builtin;
 pub mod catalog;
 pub mod factory;
+pub(crate) mod file_source_tools;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod memory;

@@ -46,7 +46,10 @@ use crate::session::SessionStore;
 use crate::trigger::schedule::ScheduleTriggerFactory;
 use crate::trigger::webhook::WebhookTriggerFactory;
 use crate::trigger::{Trigger, TriggerHandler, TriggerPayload, TriggerRegistry};
+use crate::tools::builtin::catalog::BuiltinToolCatalog;
+use crate::tools::file_source_tools;
 use crate::Runtime;
+use app::App;
 use spicepod::component::agent::Agent;
 use spicepod::component::session::SessionConfig;
 use tokio::sync::RwLock;
@@ -510,7 +513,7 @@ impl Runtime {
 
             for agent in &app.agents {
                 tracing::info!("Loading agent [{}]...", agent.name);
-                match self.load_agent(agent).await {
+                match Self::load_agent(Arc::clone(&self), app, agent).await {
                     Ok(loaded) => {
                         tracing::info!(
                             "Agent [{}] loaded with {} pipeline(s), {} trigger(s)",
@@ -530,11 +533,12 @@ impl Runtime {
     }
 
     async fn load_agent(
-        &self,
+        rt: Arc<Runtime>,
+        app: &App,
         agent: &Agent,
     ) -> Result<LoadedAgent, Box<dyn std::error::Error + Send + Sync>> {
         // Build read tools map from runtime's loaded tools
-        let tools_lock = self.tools.read().await;
+        let tools_lock = rt.tools.read().await;
         let mut available_read_tools: HashMap<String, Arc<dyn tools::SpiceModelTool>> =
             HashMap::new();
         for (name, tooling) in tools_lock.iter() {
@@ -545,7 +549,7 @@ impl Runtime {
         drop(tools_lock);
 
         // Build write tools map from runtime's loaded write tools
-        let write_tools_lock = self.write_tools.read().await;
+        let write_tools_lock = rt.write_tools.read().await;
         let mut available_write_tools: HashMap<String, Arc<dyn tools::SpiceModelTool>> =
             HashMap::new();
         for (name, tooling) in write_tools_lock.iter() {
@@ -555,12 +559,52 @@ impl Runtime {
         }
         drop(write_tools_lock);
 
+        // Construct tools declared on file_sources referenced by this agent
+        let mut agent = agent.clone();
+        let catalog = BuiltinToolCatalog::new(Arc::clone(&rt))
+            .with_approval_store(rt.approval_store())
+            .with_worktree_tracker(rt.worktree_tracker());
+
+        for fs_name in &agent.file_sources.clone() {
+            let Some(file_source) = app.file_sources.iter().find(|fs| fs.name == *fs_name) else {
+                tracing::warn!(
+                    "Agent '{}' references unknown file_source '{fs_name}', skipping",
+                    agent.name
+                );
+                continue;
+            };
+
+            for tool_shorthand in &file_source.tools {
+                let (tool_id, is_write) = file_source_tools::parse_tool_shorthand(tool_shorthand);
+                let derived_params =
+                    file_source_tools::derive_tool_params(file_source, tool_id);
+
+                match catalog.construct_builtin(tool_id, None, None, &derived_params) {
+                    Ok(tool) => {
+                        if is_write {
+                            available_write_tools.insert(tool_id.to_string(), tool);
+                        } else {
+                            available_read_tools.insert(tool_id.to_string(), Arc::clone(&tool));
+                            if !agent.read_tools.contains(&tool_id.to_string()) {
+                                agent.read_tools.push(tool_id.to_string());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to construct file_source tool '{tool_id}' for file_source '{fs_name}': {e}"
+                        );
+                    }
+                }
+            }
+        }
+
         // Resolve pipelines
         let mut resolved_pipelines = Vec::new();
         for pipeline_config in &agent.pipelines {
             let resolved = resolve_workflow(
                 pipeline_config,
-                agent,
+                &agent,
                 &available_read_tools,
                 &available_write_tools,
             )?;
@@ -583,16 +627,16 @@ impl Runtime {
         });
 
         // Build memory manager
-        let memory_manager = build_memory_manager(agent);
+        let memory_manager = build_memory_manager(&agent);
 
         // Build model caller
         let model_caller: Arc<dyn ModelCaller> = Arc::new(RuntimeModelCaller {
-            llms: self.completion_llms(),
+            llms: rt.completion_llms(),
         });
 
         // Create and start triggers for each pipeline
         let mut triggers: Vec<Box<dyn Trigger>> = Vec::new();
-        let webhook_registry = self.webhook_registry.clone();
+        let webhook_registry = rt.webhook_registry.clone();
 
         for pipeline in &resolved_pipelines {
             // Find the matching pipeline config to get the trigger config

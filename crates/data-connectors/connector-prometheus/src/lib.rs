@@ -85,7 +85,7 @@ impl DataConnectorFactory for PrometheusFactory {
         params: ConnectorParams,
     ) -> Pin<Box<dyn Future<Output = NewDataConnectorResult> + Send>> {
         Box::pin(async move {
-            let endpoint_str = params.parameters.get("endpoint").expose().map_err(|p| {
+            let endpoint_str = params.parameters.get("endpoint").expose().ok_or_else(|p| {
                 DataConnectorError::InvalidConfigurationNoSource {
                     dataconnector: "prometheus".to_string(),
                     message: format!(

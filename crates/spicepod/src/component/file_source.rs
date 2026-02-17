@@ -38,6 +38,9 @@ pub struct FileSource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<String>,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(rename = "dependsOn", default)]
     pub depends_on: Vec<String>,
@@ -58,6 +61,7 @@ impl WithDependsOn<FileSource> for FileSource {
             params: self.params.clone(),
             env: self.env.clone(),
             refresh: self.refresh.clone(),
+            tools: self.tools.clone(),
             depends_on: depends_on.to_vec(),
         }
     }
