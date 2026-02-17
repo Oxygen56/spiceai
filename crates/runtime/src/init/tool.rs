@@ -19,6 +19,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use crate::{
     Runtime, SpiceToolCatalog, UnableToInitializeLlmToolSnafu, metrics, status,
     tools::{self, Tooling, factory::default_available_catalogs},
+    tools::builtin::catalog::BuiltinToolCatalog,
+    tools::file_source_tools,
 };
 use futures::future::join_all;
 use opentelemetry::KeyValue;
@@ -58,6 +60,39 @@ impl Runtime {
         }
 
         let _ = join_all(spawned_tasks).await;
+
+        // Register tools declared on file_sources so they're available when models snapshot tools.
+        if let Some(app) = app_lock.as_ref() {
+            let catalog = BuiltinToolCatalog::new(Arc::clone(&self))
+                .with_approval_store(self.approval_store())
+                .with_worktree_tracker(self.worktree_tracker());
+
+            for file_source in &app.file_sources {
+                for tool_shorthand in &file_source.tools {
+                    let (tool_id, is_write) =
+                        file_source_tools::parse_tool_shorthand(tool_shorthand);
+                    let derived_params =
+                        file_source_tools::derive_tool_params(file_source, tool_id);
+
+                    match catalog.construct_builtin(tool_id, None, None, &derived_params) {
+                        Ok(tool) => {
+                            if is_write {
+                                self.insert_write_tool(tool.into()).await;
+                            } else {
+                                self.insert_tool(tool.into()).await;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to construct file_source tool '{tool_id}' \
+                                 for file_source '{}': {e}",
+                                file_source.name,
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     async fn insert_tool_catalog(&self, t: &Arc<dyn SpiceToolCatalog>) {

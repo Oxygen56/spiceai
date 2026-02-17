@@ -46,7 +46,6 @@ use crate::session::SessionStore;
 use crate::trigger::schedule::ScheduleTriggerFactory;
 use crate::trigger::webhook::WebhookTriggerFactory;
 use crate::trigger::{Trigger, TriggerHandler, TriggerPayload, TriggerRegistry};
-use crate::tools::builtin::catalog::BuiltinToolCatalog;
 use crate::tools::file_source_tools;
 use crate::Runtime;
 use app::App;
@@ -559,12 +558,9 @@ impl Runtime {
         }
         drop(write_tools_lock);
 
-        // Construct tools declared on file_sources referenced by this agent
+        // Add file_source tool names to agent's read_tools for pipeline resolution.
+        // The tools themselves are already in rt.tools/rt.write_tools (registered during load_tools).
         let mut agent = agent.clone();
-        let catalog = BuiltinToolCatalog::new(Arc::clone(&rt))
-            .with_approval_store(rt.approval_store())
-            .with_worktree_tracker(rt.worktree_tracker());
-
         for fs_name in &agent.file_sources.clone() {
             let Some(file_source) = app.file_sources.iter().find(|fs| fs.name == *fs_name) else {
                 tracing::warn!(
@@ -575,26 +571,10 @@ impl Runtime {
             };
 
             for tool_shorthand in &file_source.tools {
-                let (tool_id, is_write) = file_source_tools::parse_tool_shorthand(tool_shorthand);
-                let derived_params =
-                    file_source_tools::derive_tool_params(file_source, tool_id);
-
-                match catalog.construct_builtin(tool_id, None, None, &derived_params) {
-                    Ok(tool) => {
-                        if is_write {
-                            available_write_tools.insert(tool_id.to_string(), tool);
-                        } else {
-                            available_read_tools.insert(tool_id.to_string(), Arc::clone(&tool));
-                            if !agent.read_tools.contains(&tool_id.to_string()) {
-                                agent.read_tools.push(tool_id.to_string());
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to construct file_source tool '{tool_id}' for file_source '{fs_name}': {e}"
-                        );
-                    }
+                let (tool_id, _is_write) =
+                    file_source_tools::parse_tool_shorthand(tool_shorthand);
+                if !agent.read_tools.contains(&tool_id.to_string()) {
+                    agent.read_tools.push(tool_id.to_string());
                 }
             }
         }
