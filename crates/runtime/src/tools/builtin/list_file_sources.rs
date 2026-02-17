@@ -23,6 +23,7 @@ use tools::SpiceModelTool;
 use tracing_futures::Instrument;
 
 use crate::Runtime;
+use crate::tools::builtin::git_worktree::WorktreeTracker;
 use crate::tools::utils::parameters;
 
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
@@ -35,17 +36,24 @@ pub struct ListFileSourcesTool {
     name: String,
     description: String,
     rt: Arc<Runtime>,
+    worktree_tracker: WorktreeTracker,
 }
 
 impl ListFileSourcesTool {
     #[must_use]
-    pub fn new(name: Option<&str>, description: Option<&str>, rt: Arc<Runtime>) -> Self {
+    pub fn new(
+        name: Option<&str>,
+        description: Option<&str>,
+        rt: Arc<Runtime>,
+        worktree_tracker: WorktreeTracker,
+    ) -> Self {
         Self {
             name: name.unwrap_or("list_file_sources").to_string(),
             description: description
                 .unwrap_or("List available file sources and their local paths")
                 .to_string(),
             rt,
+            worktree_tracker,
         }
     }
 }
@@ -78,7 +86,7 @@ impl SpiceModelTool for ListFileSourcesTool {
                 .unwrap_or_default();
             drop(app_lock);
 
-            let results: Vec<Value> = file_sources
+            let mut results: Vec<Value> = file_sources
                 .iter()
                 .filter(|fs| {
                     req.name
@@ -87,17 +95,44 @@ impl SpiceModelTool for ListFileSourcesTool {
                 })
                 .map(|fs| {
                     let source_type = fs.from.split(':').next().unwrap_or(&fs.from);
-                    json!({
+
+                    // Surface non-secret params (branch, etc.) — filter out tokens/keys/passwords
+                    let safe_params: serde_json::Map<String, Value> = fs.params.iter()
+                        .filter(|(k, _)| {
+                            !k.contains("token") && !k.contains("key")
+                                && !k.contains("secret") && !k.contains("password")
+                        })
+                        .map(|(k, v)| (k.clone(), json!(v)))
+                        .collect();
+
+                    let mut entry = json!({
                         "name": fs.name,
                         "source_type": source_type,
                         "from": fs.from,
                         "local_path": fs.path,
                         "refresh_schedule": fs.refresh,
-                    })
+                    });
+                    if !safe_params.is_empty() {
+                        entry["params"] = Value::Object(safe_params);
+                    }
+                    entry
                 })
                 .collect();
 
+            // Include dynamically tracked worktrees.
+            for (name, wt) in self.worktree_tracker.list() {
+                if req.name.as_ref().map_or(true, |n| name.contains(n.as_str())) {
+                    results.push(json!({
+                        "name": name,
+                        "source_type": "worktree",
+                        "from": format!("git_worktree:{}", wt.branch),
+                        "local_path": wt.path.to_string_lossy(),
+                    }));
+                }
+            }
+
             let total = results.len();
+            tracing::debug!(total = total, filter = ?req.name, "list_file_sources results");
             Ok(json!({
                 "file_sources": results,
                 "total": total,
@@ -113,7 +148,7 @@ impl SpiceModelTool for ListFileSourcesTool {
                 Ok(value)
             }
             Err(e) => {
-                tracing::error!(target: "task_history", parent: &span, "{e}");
+                tracing::error!(target: "task_history", parent: &span, "list_file_sources failed: {e}");
                 Err(e)
             }
         }

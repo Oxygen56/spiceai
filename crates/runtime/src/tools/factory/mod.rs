@@ -89,7 +89,8 @@ pub async fn register_all_factories(rt: Arc<Runtime>) {
         "builtin".to_string(),
         ToolFactory::Tool(Arc::new(
             BuiltinToolCatalog::new(Arc::clone(&rt))
-                .with_approval_store(rt.approval_store()),
+                .with_approval_store(rt.approval_store())
+                .with_worktree_tracker(rt.worktree_tracker()),
         )),
     );
     registry.insert(
@@ -121,7 +122,8 @@ pub fn default_available_catalogs(rt: Arc<Runtime>) -> Vec<Arc<dyn SpiceToolCata
     vec![
         Arc::new(
             BuiltinToolCatalog::new(Arc::clone(&rt))
-                .with_approval_store(rt.approval_store()),
+                .with_approval_store(rt.approval_store())
+                .with_worktree_tracker(rt.worktree_tracker()),
         ),
         Arc::new(MemoryToolCatalog::new(rt)),
     ]

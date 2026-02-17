@@ -25,7 +25,7 @@ use runtime_datafusion::allowlist::ResolvedTableAwareAllowlist;
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::datafusion::{SPICE_DEFAULT_CATALOG, SPICE_DEFAULT_SCHEMA};
@@ -117,6 +117,7 @@ pub async fn get_tools_with_allowlist(
     table_allowlist: Option<ResolvedTableAwareAllowlist>,
 ) -> Vec<Arc<dyn SpiceModelTool>> {
     let all_tools = rt.tools.read().await;
+    let all_write_tools = rt.write_tools.read().await;
 
     let mut tools = vec![];
     let mut missing_tools = vec![];
@@ -155,12 +156,13 @@ pub async fn get_tools_with_allowlist(
             } else {
                 missing_tools.push(tt);
             }
-        } else if let Some(tool) = all_tools.get(tt) {
+        } else if let Some(tool) = all_tools.get(tt).or_else(|| all_write_tools.get(tt)) {
             if let Some(ref allowlist) = table_allowlist
                 && BuiltinToolCatalog::is_builtin_tool(tt)
             {
                 if let Ok(t) = BuiltinToolCatalog::new(Arc::clone(&rt))
                     .with_table_allowlist(allowlist.clone())
+                    .with_worktree_tracker(rt.worktree_tracker())
                     .construct_builtin(tt, None, None, &HashMap::new())
                 {
                     tools.push(t);
@@ -181,9 +183,21 @@ pub async fn get_tools_with_allowlist(
         }
     }
 
+    // When using Auto mode, also include any user-defined tools from the spicepod
+    // that aren't already in the defaults list.
+    if matches!(opts, SpiceToolsOptions::Auto) {
+        let default_names: HashSet<&str> = opts.tools_by_name().into_iter().collect();
+        for (name, tool) in all_tools.iter().chain(all_write_tools.iter()) {
+            if !default_names.contains(name.as_str()) {
+                tools.extend(tool.tools().await);
+            }
+        }
+    }
+
     if !missing_tools.is_empty() {
         let available_tools = all_tools
             .keys()
+            .chain(all_write_tools.keys())
             .map(String::as_str)
             .collect::<Vec<&str>>()
             .join(", ");

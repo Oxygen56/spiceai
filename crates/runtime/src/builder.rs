@@ -341,6 +341,7 @@ impl RuntimeBuilder {
             agents: Arc::new(RwLock::new(HashMap::new())),
             webhook_registry: Arc::new(RwLock::new(HashMap::new())),
             approval_store: crate::tools::builtin::approval::store::ApprovalStore::default(),
+            worktree_tracker: crate::tools::builtin::git_worktree::WorktreeTracker::default(),
         };
 
         let mut extensions: HashMap<String, Arc<dyn Extension>> = HashMap::new();

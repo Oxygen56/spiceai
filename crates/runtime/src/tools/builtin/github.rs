@@ -19,6 +19,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use tools::SpiceModelTool;
 use tracing::Span;
 use tracing_futures::Instrument;
@@ -26,11 +27,13 @@ use tracing_futures::Instrument;
 use crate::tools::utils::parameters;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
+const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct GitHubToolParams {
     /// The GitHub operation: "list_milestones", "get_milestone", "list_milestone_issues",
-    /// "create_pull_request", "get_pull_request", "add_issue_to_milestone", "list_commits".
+    /// "create_pull_request", "get_pull_request", "add_issue_to_milestone", "list_commits",
+    /// "compare", "api_get", "api_post", "api_patch", "graphql".
     operation: String,
 
     /// Milestone title or number (for milestone operations).
@@ -59,6 +62,21 @@ pub struct GitHubToolParams {
 
     /// Page number for pagination.
     page: Option<u32>,
+
+    /// API path for api_get/api_post/api_patch. Paths not starting with "/"
+    /// are auto-prefixed with "/repos/{owner}/{repo}/".
+    path: Option<String>,
+
+    /// JSON body for api_post/api_patch, or {"query": "...", "variables": {...}} for graphql.
+    json_body: Option<Value>,
+
+    /// Query parameters for api_get (e.g. {"state": "open"}).
+    query_params: Option<HashMap<String, String>>,
+
+    /// Optional list of top-level field names to include in the response.
+    /// When provided, each object in the response is filtered to only these keys.
+    /// Useful for reducing context size (e.g. ["number", "title", "state"]).
+    fields: Option<Vec<String>>,
 }
 
 const KNOWN_OPERATIONS: &[&str] = &[
@@ -69,6 +87,11 @@ const KNOWN_OPERATIONS: &[&str] = &[
     "get_pull_request",
     "add_issue_to_milestone",
     "list_commits",
+    "compare",
+    "api_get",
+    "api_post",
+    "api_patch",
+    "graphql",
 ];
 
 #[derive(Debug)]
@@ -99,7 +122,7 @@ impl GitHubTool {
             name: name.unwrap_or("github").to_string(),
             description: description
                 .unwrap_or(
-                    "Interact with GitHub repositories. Supports milestones, pull requests, commits, and issues.",
+                    "Interact with GitHub repositories. Supports milestones, pull requests, commits, and issues. IMPORTANT: Always use the 'fields' parameter to request only the specific fields you need (e.g. [\"number\", \"title\", \"state\"]). Request as few fields as possible to satisfy your task.",
                 )
                 .to_string(),
             owner,
@@ -118,6 +141,7 @@ impl GitHubTool {
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        tracing::debug!(method = "GET", path = %path, "GitHub API request");
         let url = format!("{GITHUB_API_BASE}{path}");
         let response = self
             .client
@@ -134,9 +158,10 @@ impl GitHubTool {
         let body: Value = response.json().await?;
 
         if !status.is_success() {
+            let err_body = serde_json::to_string(&body).unwrap_or_default();
+            tracing::warn!(method = "GET", path = %path, %status, body = %err_body, "GitHub API error response");
             return Err(format!(
-                "GitHub API GET {path} returned HTTP {status}: {}",
-                serde_json::to_string(&body).unwrap_or_default()
+                "GitHub API GET {path} returned HTTP {status}: {err_body}",
             )
             .into());
         }
@@ -149,6 +174,7 @@ impl GitHubTool {
         path: &str,
         body: &Value,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        tracing::debug!(method = "POST", path = %path, "GitHub API request");
         let url = format!("{GITHUB_API_BASE}{path}");
         let response = self
             .client
@@ -165,9 +191,10 @@ impl GitHubTool {
         let resp_body: Value = response.json().await?;
 
         if !status.is_success() {
+            let err_body = serde_json::to_string(&resp_body).unwrap_or_default();
+            tracing::warn!(method = "POST", path = %path, %status, body = %err_body, "GitHub API error response");
             return Err(format!(
-                "GitHub API POST {path} returned HTTP {status}: {}",
-                serde_json::to_string(&resp_body).unwrap_or_default()
+                "GitHub API POST {path} returned HTTP {status}: {err_body}",
             )
             .into());
         }
@@ -180,6 +207,7 @@ impl GitHubTool {
         path: &str,
         body: &Value,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        tracing::debug!(method = "PATCH", path = %path, "GitHub API request");
         let url = format!("{GITHUB_API_BASE}{path}");
         let response = self
             .client
@@ -196,14 +224,57 @@ impl GitHubTool {
         let resp_body: Value = response.json().await?;
 
         if !status.is_success() {
+            let err_body = serde_json::to_string(&resp_body).unwrap_or_default();
+            tracing::warn!(method = "PATCH", path = %path, %status, body = %err_body, "GitHub API error response");
             return Err(format!(
-                "GitHub API PATCH {path} returned HTTP {status}: {}",
-                serde_json::to_string(&resp_body).unwrap_or_default()
+                "GitHub API PATCH {path} returned HTTP {status}: {err_body}",
             )
             .into());
         }
 
         Ok(resp_body)
+    }
+
+    async fn api_graphql(
+        &self,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        tracing::debug!(method = "POST", path = "/graphql", "GitHub GraphQL request");
+        let body = json!({ "query": query, "variables": variables });
+        let response = self
+            .client
+            .post(GITHUB_GRAPHQL_URL)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/json")
+            .header("User-Agent", "spice-ai-agent")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let resp_body: Value = response.json().await?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "GitHub GraphQL returned HTTP {status}: {}",
+                serde_json::to_string(&resp_body).unwrap_or_default()
+            )
+            .into());
+        }
+
+        if let Some(errors) = resp_body.get("errors") {
+            return Err(format!(
+                "GitHub GraphQL errors: {}",
+                serde_json::to_string(errors).unwrap_or_default()
+            )
+            .into());
+        }
+
+        resp_body
+            .get("data")
+            .cloned()
+            .ok_or_else(|| "GitHub GraphQL response missing 'data' field".to_string().into())
     }
 
     // -----------------------------------------------------------------------
@@ -281,44 +352,98 @@ impl GitHubTool {
             );
         };
 
-        let per_page = params.per_page.unwrap_or(100).to_string();
-        let page = params.page.unwrap_or(1).to_string();
-        let milestone_str = milestone_number.to_string();
-        let path = format!("/repos/{}/{}/issues", self.owner, self.repo);
+        // Use GraphQL to fetch milestone PRs with merge commit SHAs in a single query.
+        // The REST Issues API doesn't return merge_commit_sha; only the Pulls API / GraphQL do.
+        let query = r#"
+            query($owner: String!, $repo: String!, $milestone_number: Int!) {
+              repository(owner: $owner, name: $repo) {
+                milestone(number: $milestone_number) {
+                  pullRequests(first: 100, states: [MERGED], orderBy: {field: CREATED_AT, direction: ASC}) {
+                    nodes {
+                      number
+                      title
+                      mergeCommit { oid }
+                      mergedAt
+                    }
+                  }
+                }
+              }
+            }
+        "#;
 
-        let raw = self
-            .api_get(
-                &path,
-                &[
-                    ("milestone", &milestone_str),
-                    ("state", "all"),
-                    ("per_page", &per_page),
-                    ("page", &page),
-                ],
-            )
-            .await?;
+        let variables = json!({
+            "owner": self.owner,
+            "repo": self.repo,
+            "milestone_number": milestone_number,
+        });
 
-        // Return only number, title, and merge commit SHA for each issue/PR.
-        let items = raw
-            .as_array()
+        let data = self.api_graphql(query, variables).await?;
+
+        let nodes = data
+            .pointer("/repository/milestone/pullRequests/nodes")
+            .and_then(|n| n.as_array())
+            .ok_or("No pull requests found for milestone")?;
+
+        let mut items: Vec<Value> = nodes
+            .iter()
+            .map(|pr| {
+                json!({
+                    "number": pr.get("number"),
+                    "title": pr.get("title"),
+                    "merge_commit_sha": pr.pointer("/mergeCommit/oid"),
+                    "merged_at": pr.get("mergedAt"),
+                })
+            })
+            .collect();
+
+        // Sort by merged_at ascending (oldest first = correct cherry-pick order).
+        items.sort_by(|a, b| {
+            let a_time = a.get("merged_at").and_then(|v| v.as_str()).unwrap_or("");
+            let b_time = b.get("merged_at").and_then(|v| v.as_str()).unwrap_or("");
+            a_time.cmp(b_time)
+        });
+
+        Ok(json!(items))
+    }
+
+    async fn handle_compare(
+        &self,
+        params: &GitHubToolParams,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let base = params
+            .base
+            .as_deref()
+            .ok_or("compare requires a 'base' parameter")?;
+        let head = params.head.as_deref().unwrap_or("trunk");
+
+        let path = format!(
+            "/repos/{}/{}/compare/{base}...{head}",
+            self.owner, self.repo
+        );
+        let raw = self.api_get(&path, &[]).await?;
+
+        let commits = raw
+            .get("commits")
+            .and_then(|c| c.as_array())
             .map(|arr| {
                 arr.iter()
-                    .map(|issue| {
-                        let commit = issue
-                            .get("pull_request")
-                            .and_then(|pr| pr.get("merge_commit_sha"))
-                            .and_then(|v| v.as_str());
+                    .map(|c| {
                         json!({
-                            "number": issue.get("number"),
-                            "title": issue.get("title"),
-                            "commit": commit,
+                            "sha": c.get("sha"),
+                            "message": c.get("commit")
+                                .and_then(|cm| cm.get("message"))
+                                .and_then(|m| m.as_str())
+                                .map(|m| m.lines().next().unwrap_or(m)),
                         })
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
 
-        Ok(json!(items))
+        Ok(json!({
+            "total_commits": commits.len(),
+            "commits": commits,
+        }))
     }
 
     async fn handle_list_commits(
@@ -413,17 +538,109 @@ impl GitHubTool {
     }
 
     // -----------------------------------------------------------------------
+    // Arbitrary API operations
+    // -----------------------------------------------------------------------
+
+    /// Resolve API path. Paths not starting with "/" are prefixed with "/repos/{owner}/{repo}/".
+    fn resolve_api_path(
+        &self,
+        params: &GitHubToolParams,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let raw = params
+            .path
+            .as_deref()
+            .ok_or("api_get/api_post/api_patch requires a 'path' parameter")?;
+        if raw.starts_with('/') {
+            Ok(raw.to_string())
+        } else {
+            Ok(format!("/repos/{}/{}/{raw}", self.owner, self.repo))
+        }
+    }
+
+    async fn handle_arbitrary_get(
+        &self,
+        params: &GitHubToolParams,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let path = self.resolve_api_path(params)?;
+        let query: Vec<(&str, &str)> = params
+            .query_params
+            .as_ref()
+            .map(|qp| qp.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect())
+            .unwrap_or_default();
+        self.api_get(&path, &query).await
+    }
+
+    async fn handle_arbitrary_post(
+        &self,
+        params: &GitHubToolParams,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let path = self.resolve_api_path(params)?;
+        let body = params.json_body.as_ref().cloned().unwrap_or(json!({}));
+        self.api_post(&path, &body).await
+    }
+
+    async fn handle_arbitrary_patch(
+        &self,
+        params: &GitHubToolParams,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let path = self.resolve_api_path(params)?;
+        let body = params.json_body.as_ref().cloned().unwrap_or(json!({}));
+        self.api_patch(&path, &body).await
+    }
+
+    async fn handle_graphql(
+        &self,
+        params: &GitHubToolParams,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let json_body = params
+            .json_body
+            .as_ref()
+            .ok_or("graphql requires a 'json_body' with 'query' field")?;
+        let query = json_body
+            .get("query")
+            .and_then(|q| q.as_str())
+            .ok_or("graphql requires json_body.query to be a string")?;
+        let variables = json_body
+            .get("variables")
+            .cloned()
+            .unwrap_or(json!({}));
+        self.api_graphql(query, variables).await
+    }
+
+    // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// Search open milestones by title, returning the milestone number.
+    /// Filter a JSON value to only include the specified fields.
+    /// - For objects: keep only matching keys
+    /// - For arrays: filter each element
+    /// - For other types: return as-is
+    fn filter_fields(value: Value, fields: &[String]) -> Value {
+        match value {
+            Value::Object(map) => {
+                let filtered: serde_json::Map<String, Value> = map
+                    .into_iter()
+                    .filter(|(k, _)| fields.iter().any(|f| f == k))
+                    .collect();
+                Value::Object(filtered)
+            }
+            Value::Array(arr) => Value::Array(
+                arr.into_iter()
+                    .map(|v| Self::filter_fields(v, fields))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    /// Search milestones by title, returning the milestone number.
     async fn find_milestone_number_by_title(
         &self,
         title: &str,
     ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         let path = format!("/repos/{}/{}/milestones", self.owner, self.repo);
         let milestones = self
-            .api_get(&path, &[("state", "closed"), ("per_page", "100")])
+            .api_get(&path, &[("state", "all"), ("per_page", "100")])
             .await?;
 
         let milestones = milestones
@@ -433,6 +650,7 @@ impl GitHubTool {
         for ms in milestones {
             if ms["title"].as_str() == Some(title) {
                 if let Some(n) = ms["number"].as_u64() {
+                    tracing::debug!(title = %title, number = n, "Resolved milestone by title");
                     return Ok(n);
                 }
             }
@@ -509,16 +727,34 @@ impl SpiceModelTool for GitHubTool {
                 .into());
             }
 
-            match params.operation.as_str() {
+            tracing::debug!(operation = %params.operation, "Dispatching GitHub operation");
+
+            let mut result = match params.operation.as_str() {
                 "list_milestones" => self.handle_list_milestones(&params).await,
                 "get_milestone" => self.handle_get_milestone(&params).await,
                 "list_milestone_issues" => self.handle_list_milestone_issues(&params).await,
                 "list_commits" => self.handle_list_commits(&params).await,
+                "compare" => self.handle_compare(&params).await,
                 "create_pull_request" => self.handle_create_pull_request(&params).await,
                 "get_pull_request" => self.handle_get_pull_request(&params).await,
                 "add_issue_to_milestone" => self.handle_add_issue_to_milestone(&params).await,
+                "api_get" => self.handle_arbitrary_get(&params).await,
+                "api_post" => self.handle_arbitrary_post(&params).await,
+                "api_patch" => self.handle_arbitrary_patch(&params).await,
+                "graphql" => self.handle_graphql(&params).await,
                 _ => unreachable!(),
+            };
+
+            // Filter response fields if requested.
+            if let Ok(ref mut value) = result {
+                if let Some(ref fields) = params.fields {
+                    if !fields.is_empty() {
+                        *value = Self::filter_fields(std::mem::take(value), fields);
+                    }
+                }
             }
+
+            result
         }
         .instrument(span.clone())
         .await;
@@ -530,7 +766,7 @@ impl SpiceModelTool for GitHubTool {
                 Ok(value)
             }
             Err(e) => {
-                tracing::error!(target: "task_history", parent: &span, "{e}");
+                tracing::error!(target: "task_history", parent: &span, "GitHub tool failed: {e}");
                 Err(e)
             }
         }

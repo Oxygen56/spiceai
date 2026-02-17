@@ -29,9 +29,10 @@ use crate::tools::utils::parameters;
 
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct GitToolParams {
-    /// The git operation: "status", "log", "diff", "branch", "checkout", "cherry-pick", "commit", "push".
+    /// The git operation: "status", "log", "diff", "add", "branch", "checkout", "cherry-pick", "commit", "push".
     operation: String,
-    /// Working directory (defaults to the configured repo_path). Useful for operating in worktrees.
+    /// Working directory. Must be an absolute path within repo_path or a tracked worktree.
+    /// Prefer using worktree_name instead for worktree operations.
     working_directory: Option<String>,
     /// For cherry-pick: list of commit SHAs to cherry-pick.
     commits: Option<Vec<String>>,
@@ -41,6 +42,8 @@ pub struct GitToolParams {
     branch: Option<String>,
     /// For push: the remote name (defaults to "origin").
     remote: Option<String>,
+    /// For add: list of file paths to stage. If empty or omitted, stages all changes (".").
+    files: Option<Vec<String>>,
     /// Additional CLI arguments.
     args: Option<Vec<String>>,
     /// Optional worktree name to resolve from WorktreeTracker.
@@ -49,7 +52,7 @@ pub struct GitToolParams {
 }
 
 const READ_OPERATIONS: &[&str] = &["status", "log", "diff"];
-const WRITE_OPERATIONS: &[&str] = &["branch", "checkout", "cherry-pick", "commit", "push"];
+const WRITE_OPERATIONS: &[&str] = &["add", "branch", "checkout", "cherry-pick", "commit", "push"];
 
 #[derive(Debug)]
 pub struct GitTool {
@@ -59,6 +62,7 @@ pub struct GitTool {
     capability: ToolCapability,
     allowed_operations: Vec<String>,
     worktree_tracker: Option<WorktreeTracker>,
+    github_token: Option<String>,
 }
 
 impl GitTool {
@@ -74,6 +78,7 @@ impl GitTool {
         capability: ToolCapability,
         allowed_operations: Vec<String>,
         worktree_tracker: Option<WorktreeTracker>,
+        github_token: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         if !repo_path.exists() {
             return Err(
@@ -95,6 +100,7 @@ impl GitTool {
             capability,
             allowed_operations,
             worktree_tracker,
+            github_token,
         })
     }
 
@@ -217,7 +223,7 @@ impl GitTool {
             }
         }
 
-        // Priority 2: working_directory parameter (must be within repo_path)
+        // Priority 2: working_directory parameter (must be within repo_path or a tracked worktree)
         if let Some(wd) = &req.working_directory {
             let wd_path = Path::new(wd);
             if !wd_path.exists() {
@@ -225,15 +231,29 @@ impl GitTool {
             }
             let canonical_wd = wd_path.canonicalize()?;
             let canonical_repo = self.repo_path.canonicalize()?;
-            if !canonical_wd.starts_with(&canonical_repo) {
-                return Err(format!(
-                    "working_directory '{}' is outside the configured repo_path '{}'",
-                    wd,
-                    self.repo_path.display()
-                )
-                .into());
+
+            // Allow if within repo_path
+            if canonical_wd.starts_with(&canonical_repo) {
+                return Ok(canonical_wd);
             }
-            return Ok(canonical_wd);
+
+            // Allow if it matches a tracked worktree path
+            if let Some(tracker) = &self.worktree_tracker {
+                for (_name, wt) in tracker.list() {
+                    if let Ok(canonical_wt) = wt.path.canonicalize() {
+                        if canonical_wd.starts_with(&canonical_wt) {
+                            return Ok(canonical_wd);
+                        }
+                    }
+                }
+            }
+
+            return Err(format!(
+                "working_directory '{}' is outside the configured repo_path '{}' and is not a tracked worktree",
+                wd,
+                self.repo_path.display()
+            )
+            .into());
         }
 
         // Priority 3: repo_path default
@@ -248,6 +268,17 @@ impl GitTool {
     ) -> Result<tokio::process::Command, Box<dyn std::error::Error + Send + Sync>> {
         let mut cmd = tokio::process::Command::new("git");
         cmd.current_dir(work_dir);
+
+        // Disable interactive credential prompts — fail fast instead of hanging
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+
+        // Inject HTTPS credentials via inline credential helper
+        if let Some(ref token) = self.github_token {
+            let helper = format!(
+                "!f() {{ echo \"username=x-access-token\"; echo \"password={token}\"; }}; f"
+            );
+            cmd.arg("-c").arg(format!("credential.helper={helper}"));
+        }
 
         match req.operation.as_str() {
             "status" => {
@@ -266,6 +297,21 @@ impl GitTool {
             }
             "diff" => {
                 cmd.arg("diff");
+                if let Some(ref args) = req.args {
+                    cmd.args(args);
+                }
+            }
+            "add" => {
+                cmd.arg("add");
+                if let Some(ref files) = req.files {
+                    if !files.is_empty() {
+                        cmd.args(files);
+                    } else {
+                        cmd.arg(".");
+                    }
+                } else {
+                    cmd.arg(".");
+                }
                 if let Some(ref args) = req.args {
                     cmd.args(args);
                 }
@@ -358,12 +404,22 @@ impl SpiceModelTool for GitTool {
             self.validate_request(&req)?;
 
             let work_dir = self.resolve_working_directory(&req)?;
+            tracing::debug!(operation = %req.operation, work_dir = %work_dir.display(), "Executing git operation");
+
             let mut cmd = self.build_command(&req, &work_dir)?;
 
             let output = cmd.output().await?;
 
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+            if !output.status.success() {
+                tracing::warn!(
+                    operation = %req.operation,
+                    exit_code = output.status.code().unwrap_or(-1),
+                    stderr = %stderr,
+                    "Git command exited with non-zero status");
+            }
 
             Ok(json!({
                 "exit_code": output.status.code().unwrap_or(-1),
@@ -381,7 +437,7 @@ impl SpiceModelTool for GitTool {
                 Ok(value)
             }
             Err(e) => {
-                tracing::error!(target: "task_history", parent: &span, "{e}");
+                tracing::error!(target: "task_history", parent: &span, "Git tool failed: {e}");
                 Err(e)
             }
         }
@@ -404,6 +460,7 @@ mod tests {
             capability,
             ops.into_iter().map(ToString::to_string).collect(),
             None,
+            None,
         )
         .expect("temp_dir should exist")
     }
@@ -421,6 +478,7 @@ mod tests {
             message: None,
             branch: None,
             remote: None,
+            files: None,
             args: None,
             worktree_name: None,
         };
@@ -448,6 +506,7 @@ mod tests {
             message: Some("test commit".to_string()),
             branch: None,
             remote: None,
+            files: None,
             args: None,
             worktree_name: None,
         };
@@ -477,6 +536,7 @@ mod tests {
             message: None,
             branch: Some("main".to_string()),
             remote: Some("origin".to_string()),
+            files: None,
             args: Some(vec!["--force".to_string()]),
             worktree_name: None,
         };
@@ -498,6 +558,7 @@ mod tests {
             message: None,
             branch: Some("main".to_string()),
             remote: Some("origin".to_string()),
+            files: None,
             args: Some(vec!["-f".to_string()]),
             worktree_name: None,
         };
@@ -525,6 +586,7 @@ mod tests {
             message: None,
             branch: None,
             remote: None,
+            files: None,
             args: None,
             worktree_name: None,
         };
@@ -554,6 +616,7 @@ mod tests {
             message: None,
             branch: None,
             remote: None,
+            files: None,
             args: None,
             worktree_name: None,
         };
@@ -574,6 +637,7 @@ mod tests {
             message: None,
             branch: None,
             remote: None,
+            files: None,
             args: None,
             worktree_name: None,
         };
@@ -600,6 +664,7 @@ mod tests {
             message: None,
             branch: None,
             remote: None,
+            files: None,
             args: None,
             worktree_name: None,
         };
@@ -626,6 +691,7 @@ mod tests {
             message: None,
             branch: None,
             remote: None,
+            files: None,
             args: None,
             worktree_name: None,
         };
@@ -646,6 +712,7 @@ mod tests {
             message: Some("fix: resolve issue".to_string()),
             branch: None,
             remote: None,
+            files: None,
             args: None,
             worktree_name: None,
         };
@@ -658,6 +725,7 @@ mod tests {
             message: None,
             branch: Some("main".to_string()),
             remote: Some("origin".to_string()),
+            files: None,
             args: None,
             worktree_name: None,
         };
@@ -670,6 +738,7 @@ mod tests {
             message: None,
             branch: None,
             remote: None,
+            files: None,
             args: None,
             worktree_name: None,
         };
@@ -684,6 +753,7 @@ mod tests {
             PathBuf::from("/nonexistent/path/to/repo"),
             ToolCapability::ReadWrite,
             vec!["status".to_string()],
+            None,
             None,
         );
         assert!(result.is_err());

@@ -24,6 +24,7 @@ use tools::SpiceModelTool;
 use tracing::Span;
 use tracing_futures::Instrument;
 
+use crate::tools::builtin::git_worktree::WorktreeTracker;
 use crate::tools::utils::parameters;
 
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
@@ -32,6 +33,7 @@ pub struct ClaudeCodeToolParams {
     prompt: String,
 
     /// Working directory for Claude Code to operate in.
+    /// Use a worktree name (from git_worktree) or an absolute path from list_file_sources.
     working_directory: Option<String>,
 
     /// Tools Claude Code is allowed to use (e.g., ["Bash", "Read", "Edit"]).
@@ -53,6 +55,7 @@ pub struct ClaudeCodeTool {
     default_max_turns: u32,
     default_allowed_tools: Vec<String>,
     allowed_working_dirs: Vec<PathBuf>,
+    worktree_tracker: Option<WorktreeTracker>,
 }
 
 impl ClaudeCodeTool {
@@ -69,6 +72,7 @@ impl ClaudeCodeTool {
         default_max_turns: Option<u32>,
         default_allowed_tools: Vec<String>,
         allowed_working_dirs: Vec<PathBuf>,
+        worktree_tracker: Option<WorktreeTracker>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         if allowed_working_dirs.is_empty() {
             return Err("allowed_working_dirs must not be empty".into());
@@ -87,19 +91,38 @@ impl ClaudeCodeTool {
             default_max_turns: default_max_turns.unwrap_or(5),
             default_allowed_tools,
             allowed_working_dirs,
+            worktree_tracker,
         })
     }
 
-    /// Returns `true` if `path` is within one of the allowed working directories.
+    /// Returns `true` if `path` is within one of the allowed working directories
+    /// or within a tracked worktree.
     fn is_path_allowed(&self, path: &Path) -> bool {
         let canonical = match path.canonicalize() {
             Ok(p) => p,
             Err(_) => return false,
         };
-        self.allowed_working_dirs.iter().any(|base| {
+
+        // Check static allowed directories.
+        if self.allowed_working_dirs.iter().any(|base| {
             base.canonicalize()
                 .map_or(false, |b| canonical.starts_with(&b))
-        })
+        }) {
+            return true;
+        }
+
+        // Check tracked worktree paths.
+        if let Some(ref tracker) = self.worktree_tracker {
+            for (_name, wt) in tracker.list() {
+                if let Ok(canonical_wt) = wt.path.canonicalize() {
+                    if canonical.starts_with(&canonical_wt) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 }
 
@@ -125,15 +148,26 @@ impl SpiceModelTool for ClaudeCodeTool {
 
             // Determine and validate working directory.
             let working_dir = if let Some(ref dir) = params.working_directory {
-                let path = PathBuf::from(dir);
-                if !self.is_path_allowed(&path) {
-                    return Err(format!(
-                        "Access denied: working directory '{}' is outside allowed directories",
-                        dir
-                    )
-                    .into());
+                // Try to resolve as a worktree name first
+                let resolved_from_tracker = self.worktree_tracker.as_ref()
+                    .and_then(|tracker| tracker.get(dir))
+                    .map(|wt| wt.path);
+
+                if let Some(wt_path) = resolved_from_tracker {
+                    tracing::debug!(worktree_name = %dir, path = %wt_path.display(), "Resolved working directory from worktree tracker");
+                    wt_path
+                } else {
+                    let path = PathBuf::from(dir);
+                    if !self.is_path_allowed(&path) {
+                        tracing::warn!(working_directory = %dir, allowed_dirs = ?self.allowed_working_dirs, "claude_code access denied: working directory is outside allowed directories");
+                        return Err(format!(
+                            "Access denied: working directory '{}' is outside allowed directories",
+                            dir
+                        )
+                        .into());
+                    }
+                    path
                 }
-                path
             } else {
                 self.allowed_working_dirs[0].clone()
             };
@@ -233,6 +267,7 @@ mod tests {
             None,
             vec![],
             vec![allowed.path().to_path_buf()],
+            None,
         )
         .unwrap();
 
@@ -258,6 +293,7 @@ mod tests {
             None,
             vec![],
             vec![dir.path().to_path_buf()],
+            None,
         )
         .unwrap();
 
@@ -270,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_empty_allowed_dirs_rejected() {
-        let result = ClaudeCodeTool::try_new(None, None, None, None, None, vec![], vec![]);
+        let result = ClaudeCodeTool::try_new(None, None, None, None, None, vec![], vec![], None);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -289,6 +325,7 @@ mod tests {
             None,
             vec![],
             vec![dir.path().to_path_buf()],
+            None,
         )
         .unwrap();
 
@@ -307,6 +344,7 @@ mod tests {
             Some(10),
             vec!["Bash".to_string(), "Read".to_string()],
             vec![dir.path().to_path_buf()],
+            None,
         )
         .unwrap();
 

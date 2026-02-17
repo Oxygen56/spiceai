@@ -97,6 +97,8 @@ impl GitWorktreeTool {
         let worktree_name = path_suffix.unwrap_or(branch);
         let worktree_path = self.worktree_root.join(worktree_name);
 
+        tracing::debug!(branch = %branch, worktree_name = %worktree_name, worktree_path = %worktree_path.display(), "Creating git worktree");
+
         if worktree_path.exists() {
             return Err(format!(
                 "Worktree path '{}' already exists",
@@ -217,6 +219,8 @@ impl GitWorktreeTool {
         let wt = repo.find_worktree(worktree_name)?;
         let wt_path = wt.path().to_path_buf();
 
+        tracing::debug!(worktree_name = %worktree_name, path = %wt_path.display(), "Removing worktree");
+
         wt.prune(Some(
             &mut git2::WorktreePruneOptions::new()
                 .valid(true)
@@ -303,7 +307,7 @@ impl SpiceModelTool for GitWorktreeTool {
                 Ok(value)
             }
             Err(e) => {
-                tracing::error!(target: "task_history", parent: &span, "{e}");
+                tracing::error!(target: "task_history", parent: &span, "git_worktree failed: {e}");
                 Err(e)
             }
         }

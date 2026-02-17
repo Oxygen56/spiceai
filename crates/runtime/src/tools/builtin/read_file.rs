@@ -25,6 +25,7 @@ use tracing_futures::Instrument;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::tools::builtin::git_worktree::WorktreeTracker;
 use crate::tools::utils::parameters;
 
 /// Maximum file size that can be read (1 MB).
@@ -32,7 +33,7 @@ const MAX_FILE_SIZE: u64 = 1_048_576;
 
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct ReadFileToolParams {
-    /// The path to the file to read.
+    /// Absolute path to the file to read. Use list_file_sources to discover available paths.
     path: String,
 }
 
@@ -40,6 +41,7 @@ pub struct ReadFileTool {
     name: String,
     description: String,
     base_paths: Vec<PathBuf>,
+    worktree_tracker: Option<WorktreeTracker>,
 }
 
 impl ReadFileTool {
@@ -48,6 +50,7 @@ impl ReadFileTool {
         name: Option<&str>,
         description: Option<&str>,
         base_paths: Vec<PathBuf>,
+        worktree_tracker: Option<WorktreeTracker>,
     ) -> Self {
         Self {
             name: name.unwrap_or("read_file").to_string(),
@@ -55,6 +58,7 @@ impl ReadFileTool {
                 .unwrap_or("Read the contents of a file at the given path")
                 .to_string(),
             base_paths,
+            worktree_tracker,
         }
     }
 
@@ -64,10 +68,24 @@ impl ReadFileTool {
             Err(_) => return false,
         };
 
-        self.base_paths.iter().any(|base| {
+        if self.base_paths.iter().any(|base| {
             base.canonicalize()
                 .map_or(false, |b| canonical.starts_with(&b))
-        })
+        }) {
+            return true;
+        }
+
+        if let Some(ref tracker) = self.worktree_tracker {
+            for (_name, wt) in tracker.list() {
+                if let Ok(canonical_wt) = wt.path.canonicalize() {
+                    if canonical.starts_with(&canonical_wt) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 }
 
@@ -93,6 +111,7 @@ impl SpiceModelTool for ReadFileTool {
             let file_path = PathBuf::from(&req.path);
 
             if !self.is_path_allowed(&file_path) {
+                tracing::warn!(path = %req.path, allowed_dirs = ?self.base_paths, "read_file access denied: path is outside allowed directories");
                 return Err(format!(
                     "Access denied: path '{}' is outside allowed directories",
                     req.path

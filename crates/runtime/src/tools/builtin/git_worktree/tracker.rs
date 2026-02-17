@@ -35,29 +35,66 @@ pub struct TrackedWorktree {
 
 impl WorktreeTracker {
     pub fn register(&self, name: String, tracked: TrackedWorktree) {
-        let mut map = self.inner.lock().expect("WorktreeTracker lock poisoned");
-        map.insert(name, tracked);
+        match self.inner.lock() {
+            Ok(mut map) => {
+                map.insert(name, tracked);
+            }
+            Err(e) => {
+                tracing::error!("WorktreeTracker lock poisoned in register(): {e}");
+            }
+        }
     }
 
     pub fn deregister(&self, name: &str) -> Option<TrackedWorktree> {
-        let mut map = self.inner.lock().expect("WorktreeTracker lock poisoned");
-        map.remove(name)
+        match self.inner.lock() {
+            Ok(mut map) => map.remove(name),
+            Err(e) => {
+                tracing::error!("WorktreeTracker lock poisoned in deregister(): {e}");
+                None
+            }
+        }
     }
 
     /// Get a worktree by name without removing it from the tracker.
     pub fn get(&self, name: &str) -> Option<TrackedWorktree> {
-        let map = self.inner.lock().expect("WorktreeTracker lock poisoned");
-        map.get(name).cloned()
+        match self.inner.lock() {
+            Ok(map) => map.get(name).cloned(),
+            Err(e) => {
+                tracing::error!("WorktreeTracker lock poisoned in get(): {e}");
+                None
+            }
+        }
+    }
+
+    /// List all tracked worktrees without removing them.
+    pub fn list(&self) -> Vec<(String, TrackedWorktree)> {
+        match self.inner.lock() {
+            Ok(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            Err(e) => {
+                tracing::error!("WorktreeTracker lock poisoned in list(): {e}");
+                Vec::new()
+            }
+        }
     }
 
     pub fn drain(&self) -> HashMap<String, TrackedWorktree> {
-        let mut map = self.inner.lock().expect("WorktreeTracker lock poisoned");
-        std::mem::take(&mut *map)
+        match self.inner.lock() {
+            Ok(mut map) => std::mem::take(&mut *map),
+            Err(e) => {
+                tracing::error!("WorktreeTracker lock poisoned in drain(): {e}");
+                HashMap::new()
+            }
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        let map = self.inner.lock().expect("WorktreeTracker lock poisoned");
-        map.is_empty()
+        match self.inner.lock() {
+            Ok(map) => map.is_empty(),
+            Err(e) => {
+                tracing::error!("WorktreeTracker lock poisoned in is_empty(): {e}");
+                true
+            }
+        }
     }
 }
 

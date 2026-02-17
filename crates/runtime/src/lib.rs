@@ -517,6 +517,7 @@ pub struct Runtime {
     agents: Arc<RwLock<HashMap<String, init::agent::LoadedAgent>>>,
     webhook_registry: init::agent::WebhookRegistry,
     approval_store: tools::builtin::approval::store::ApprovalStore,
+    worktree_tracker: tools::builtin::git_worktree::WorktreeTracker,
 }
 
 impl Debug for Runtime {
@@ -620,6 +621,11 @@ impl Runtime {
     #[must_use]
     pub fn approval_store(&self) -> tools::builtin::approval::store::ApprovalStore {
         self.approval_store.clone()
+    }
+
+    #[must_use]
+    pub fn worktree_tracker(&self) -> tools::builtin::git_worktree::WorktreeTracker {
+        self.worktree_tracker.clone()
     }
 
     #[must_use]

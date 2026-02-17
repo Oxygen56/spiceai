@@ -55,6 +55,7 @@ impl SpiceToolsOptions {
                 "table_schema",
                 "sql",
                 "list_datasets",
+                "list_file_sources",
                 "get_readiness",
                 "random_sample",
                 "sample_distinct_columns",

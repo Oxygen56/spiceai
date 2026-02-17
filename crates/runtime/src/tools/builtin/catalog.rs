@@ -296,7 +296,7 @@ impl BuiltinToolCatalog {
             }
             ("debug", None) => "Print a debug message to the task history log",
             ("fail", None) => "Signal that this step cannot be completed due to invalid or missing information",
-            ("github", None) => "Interact with GitHub repositories: milestones, pull requests, commits, and issues",
+            ("github", None) => "Interact with GitHub repositories: milestones, pull requests, commits, and issues. IMPORTANT: Always use the 'fields' parameter to request only the specific fields you need (e.g. [\"number\", \"title\", \"state\"]). Request as few fields as possible to satisfy your task.",
             ("approval", None) => {
                 "Request human approval before proceeding with an action"
             }
@@ -379,6 +379,7 @@ impl BuiltinToolCatalog {
                 Some(name),
                 Some(description),
                 Arc::clone(&self.rt),
+                self.worktree_tracker.clone(),
             ))),
             "grep" => {
                 let base_paths = parse_and_expand_base_paths(params);
@@ -386,6 +387,7 @@ impl BuiltinToolCatalog {
                     Some(name),
                     Some(description),
                     base_paths,
+                    Some(self.worktree_tracker.clone()),
                 )))
             }
             "read_file" => {
@@ -394,6 +396,7 @@ impl BuiltinToolCatalog {
                     Some(name),
                     Some(description),
                     base_paths,
+                    Some(self.worktree_tracker.clone()),
                 )))
             }
             "list_files" => {
@@ -402,6 +405,7 @@ impl BuiltinToolCatalog {
                     Some(name),
                     Some(description),
                     base_paths,
+                    Some(self.worktree_tracker.clone()),
                 )))
             }
             "kubectl" => {
@@ -530,6 +534,7 @@ impl BuiltinToolCatalog {
                             "status".to_string(),
                             "log".to_string(),
                             "diff".to_string(),
+                            "add".to_string(),
                             "branch".to_string(),
                             "checkout".to_string(),
                             "cherry-pick".to_string(),
@@ -537,6 +542,10 @@ impl BuiltinToolCatalog {
                             "push".to_string(),
                         ]
                     });
+                let github_token = params
+                    .get("github_token")
+                    .map(|v| v.expose_secret().to_string())
+                    .or_else(|| std::env::var("GITHUB_TOKEN").ok());
                 Ok(Arc::new(
                     GitTool::try_new(
                         Some(name),
@@ -545,6 +554,7 @@ impl BuiltinToolCatalog {
                         capability,
                         allowed_operations,
                         Some(self.worktree_tracker.clone()),
+                        github_token,
                     )
                     .context(FailedToConstructToolSnafu { id: id.to_string() })?,
                 ))
@@ -586,6 +596,7 @@ impl BuiltinToolCatalog {
                         default_max_turns,
                         default_allowed_tools,
                         allowed_working_dirs,
+                        Some(self.worktree_tracker.clone()),
                     )
                     .context(FailedToConstructToolSnafu { id: id.to_string() })?,
                 ))

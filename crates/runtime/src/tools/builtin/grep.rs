@@ -32,6 +32,7 @@ use tracing_futures::Instrument;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::tools::builtin::git_worktree::WorktreeTracker;
 use crate::tools::utils::parameters;
 
 /// Number of bytes sampled from the start of a file to detect binary content.
@@ -56,6 +57,7 @@ pub struct GrepTool {
     name: String,
     description: String,
     base_paths: Vec<PathBuf>,
+    worktree_tracker: Option<WorktreeTracker>,
 }
 
 impl GrepTool {
@@ -64,6 +66,7 @@ impl GrepTool {
         name: Option<&str>,
         description: Option<&str>,
         base_paths: Vec<PathBuf>,
+        worktree_tracker: Option<WorktreeTracker>,
     ) -> Self {
         Self {
             name: name.unwrap_or("grep").to_string(),
@@ -71,6 +74,7 @@ impl GrepTool {
                 .unwrap_or("Search for a regex pattern in files within configured directories")
                 .to_string(),
             base_paths,
+            worktree_tracker,
         }
     }
 
@@ -79,10 +83,36 @@ impl GrepTool {
             Ok(p) => p,
             Err(_) => return false,
         };
-        self.base_paths.iter().any(|base| {
+
+        if self.base_paths.iter().any(|base| {
             base.canonicalize()
                 .map_or(false, |b| canonical.starts_with(&b))
-        })
+        }) {
+            return true;
+        }
+
+        if let Some(ref tracker) = self.worktree_tracker {
+            for (_name, wt) in tracker.list() {
+                if let Ok(canonical_wt) = wt.path.canonicalize() {
+                    if canonical.starts_with(&canonical_wt) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Returns `base_paths` extended with tracked worktree paths (for `visit_dirs` symlink validation).
+    fn all_allowed_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.base_paths.clone();
+        if let Some(ref tracker) = self.worktree_tracker {
+            for (_name, wt) in tracker.list() {
+                paths.push(wt.path.clone());
+            }
+        }
+        paths
     }
 }
 
@@ -228,9 +258,10 @@ impl SpiceModelTool for GrepTool {
                 None => None,
             };
 
+            let allowed_paths = self.all_allowed_paths();
             let mut all_files = Vec::new();
-            for base in &self.base_paths {
-                visit_dirs(base, &self.base_paths, &mut all_files).ok();
+            for base in &allowed_paths {
+                visit_dirs(base, &allowed_paths, &mut all_files).ok();
             }
 
             // Apply glob filter
@@ -341,7 +372,7 @@ mod tests {
     #[tokio::test]
     async fn test_basic_search() {
         let dir = setup_test_dir();
-        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()]);
+        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()], None);
 
         let result = tool
             .call(r#"{"pattern": "hello"}"#)
@@ -355,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn test_glob_filter() {
         let dir = setup_test_dir();
-        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()]);
+        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()], None);
 
         let result = tool
             .call(r#"{"pattern": "hello", "path": "**/*.rs"}"#)
@@ -375,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn test_skips_binary_files() {
         let dir = setup_test_dir();
-        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()]);
+        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()], None);
 
         // Search for the PNG magic bytes pattern — should find nothing since binary is skipped
         let result = tool
@@ -393,7 +424,7 @@ mod tests {
     #[tokio::test]
     async fn test_context_lines() {
         let dir = setup_test_dir();
-        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()]);
+        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()], None);
 
         let result = tool
             .call(r#"{"pattern": "goodbye", "path": "**/*.rs", "context_lines": 1}"#)
@@ -419,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn test_max_results() {
         let dir = setup_test_dir();
-        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()]);
+        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()], None);
 
         let result = tool
             .call(r#"{"pattern": "hello", "max_results": 1}"#)
@@ -447,7 +478,7 @@ mod tests {
             .unwrap();
         }
 
-        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()]);
+        let tool = GrepTool::new(None, None, vec![dir.path().to_path_buf()], None);
         let result = tool
             .call(r#"{"pattern": "secret"}"#)
             .await
