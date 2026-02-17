@@ -39,6 +39,7 @@ use tokio::sync::mpsc;
 use tools::SpiceModelTool;
 use tracing::{Instrument, Span};
 
+use crate::model::context::{ContextConfig, manage_responses_context, truncate_tool_output};
 use crate::model::tool_use::encode_tool_name;
 use runtime_request_context::{AsyncMarker, RequestContext};
 
@@ -80,6 +81,7 @@ pub struct ToolUsingResponses {
     openai_tools: Vec<OpenAIResponsesTools>,
     tools: Vec<Arc<dyn SpiceModelTool>>,
     recursion_limit: Option<usize>,
+    context_config: ContextConfig,
 }
 
 impl ToolUsingResponses {
@@ -89,12 +91,14 @@ impl ToolUsingResponses {
         openai_tools: Vec<OpenAIResponsesTools>,
         tools: Vec<Arc<dyn SpiceModelTool>>,
         recursion_limit: Option<usize>,
+        context_config: ContextConfig,
     ) -> Self {
         Self {
             inner_responses,
             openai_tools,
             tools,
             recursion_limit,
+            context_config,
         }
     }
 
@@ -159,6 +163,7 @@ impl ToolUsingResponses {
         match self.as_spiced_tool(name) {
             Some(t) => match t.call(arguments).await {
                 Ok(v) => {
+                    let v = truncate_tool_output(v, self.context_config.max_tool_output_chars);
                     tracing::info!(
                         target: "task_history",
                         progress = Progress::log()
@@ -316,7 +321,12 @@ impl ToolUsingResponses {
                 Some(messages) => {
                     let mut resp = self
                         .responses_request_inner(
-                            create_new_recursive_req(&inner_req, messages, resp.usage.as_ref()),
+                            create_new_recursive_req(
+                                &inner_req,
+                                messages,
+                                resp.usage.as_ref(),
+                                &self.context_config,
+                            ),
                             recursion_limit.map(|r| r - 1),
                         )
                         .await?;
@@ -368,6 +378,7 @@ impl ToolUsingResponses {
                     self.openai_tools.clone(),
                     self.tools.clone(),
                     recursion_limit.map(|r| r - 1),
+                    self.context_config.clone(),
                 ),
                 req,
                 s,
@@ -608,7 +619,12 @@ fn make_responses_stream(
                             // Make recursive call for tool results
                             match model
                                 .responses_stream_inner(
-                                    create_new_recursive_req(&req, new_messages, None),
+                                    create_new_recursive_req(
+                                        &req,
+                                        new_messages,
+                                        None,
+                                        &model.context_config,
+                                    ),
                                     model.recursion_limit.map(|r| r - 1),
                                 )
                                 .await
@@ -670,10 +686,17 @@ fn get_tool_name(tool: &ToolDefinition) -> &str {
 
 fn create_new_recursive_req(
     req: &CreateResponse,
-    new_msg: Vec<InputItem>,
+    mut new_msg: Vec<InputItem>,
     marginal_usage: Option<&ResponseUsage>,
+    context_config: &ContextConfig,
 ) -> CreateResponse {
     let mut new_req = req.clone();
+
+    // Context management: prune old tool outputs and inject budget status if needed.
+    if let Some(usage) = marginal_usage {
+        manage_responses_context(context_config, &mut new_msg, usage.input_tokens);
+    }
+
     new_req.input = InputParam::Items(new_msg);
 
     // Remove tool_choice if it is named (since it was just used), and set it to `Auto`.

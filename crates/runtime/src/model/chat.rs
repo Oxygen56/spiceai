@@ -32,6 +32,7 @@ use spicepod::component::model::{Model, ModelFileType, ModelSource};
 use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 use token_provider::registry::TokenProviderRegistry;
 
+use super::context::extract_context_config;
 use super::wrapper::OPENAI_DEFAULT_PARAM_KEYS;
 use super::{params::get_params_spec, tool_use::ToolUsingChat, wrapper::ChatWrapper};
 use crate::token_providers::databricks::{DatabricksM2MTokenProvider, DatabricksU2MTokenProvider};
@@ -107,6 +108,11 @@ pub async fn try_to_chat_model(
         // Prevent infinite recursion in case of circular tool calls.
         .or(Some(DEFAULT_SPICE_TOOL_RECURSION_LIMIT));
 
+    // Extract context management configuration from model params.
+    let context_config = extract_context_config(|key| {
+        extract_secret!(params, key).map(ToString::to_string)
+    });
+
     // Create table allowlist from model's datasets if specified
     let table_allowlist = create_table_allowlist(&component.datasets);
 
@@ -116,6 +122,7 @@ pub async fn try_to_chat_model(
             Arc::clone(&rt),
             get_tools_with_allowlist(Arc::clone(&rt), &opts, table_allowlist).await,
             spice_recursion_limit,
+            context_config,
         )),
         Some(_) | None => model,
     };

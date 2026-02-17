@@ -16,6 +16,7 @@ limitations under the License.
 
 use crate::Runtime;
 use crate::model::ToolUsingResponses;
+use crate::model::context::extract_context_config;
 use crate::model::params::get_params_spec;
 use crate::model::tool_use_responses::OpenAIResponsesTools;
 use crate::model::wrapper::responses::ResponsesWrapper;
@@ -103,6 +104,11 @@ pub async fn try_to_responses_model(
         .transpose()
         .map_err(|_| unreachable!("SpiceToolsOptions::from_str has no error condition"))?;
 
+    // Extract context management configuration from model params.
+    let context_config = extract_context_config(|key| {
+        extract_secret!(params, key).map(ToString::to_string)
+    });
+
     // Create table allowlist from model's datasets if specified
     let table_allowlist = create_table_allowlist(&component.datasets);
 
@@ -112,6 +118,7 @@ pub async fn try_to_responses_model(
             openai_responses_tools.unwrap_or_default(),
             get_tools_with_allowlist(Arc::clone(&rt), &opts, table_allowlist).await,
             spice_recursion_limit,
+            context_config,
         )),
         Some(_) | None => model,
     };

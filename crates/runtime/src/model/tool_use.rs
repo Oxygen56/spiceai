@@ -46,6 +46,7 @@ use tracing::{Instrument, Span};
 
 use crate::Runtime;
 use crate::model::ModelContextExtension;
+use crate::model::context::{ContextConfig, manage_chat_context, truncate_tool_output};
 use llms::progress::Progress;
 use runtime_request_context::{AsyncMarker, RequestContext};
 
@@ -54,6 +55,7 @@ pub struct ToolUsingChat {
     rt: Arc<Runtime>,
     tools: Vec<Arc<dyn SpiceModelTool>>,
     recursion_limit: Option<usize>,
+    context_config: ContextConfig,
 }
 
 impl ToolUsingChat {
@@ -63,12 +65,14 @@ impl ToolUsingChat {
         rt: Arc<Runtime>,
         tools: Vec<Arc<dyn SpiceModelTool>>,
         recursion_limit: Option<usize>,
+        context_config: ContextConfig,
     ) -> Self {
         Self {
             inner_chat,
             rt,
             tools,
             recursion_limit,
+            context_config,
         }
     }
 
@@ -147,6 +151,7 @@ impl ToolUsingChat {
         match self.as_spiced_tool(tool_call) {
             Some(t) => match t.call(&tool_call.function.arguments).await {
                 Ok(v) => {
+                    let v = truncate_tool_output(v, self.context_config.max_tool_output_chars);
                     tracing::info!(
                         target: "task_history",
                         progress = Progress::log()
@@ -332,7 +337,12 @@ impl ToolUsingChat {
                 Some(messages) => {
                     let mut resp = self
                         .chat_request_inner(
-                            create_new_recursive_req(&inner_req, messages, resp.usage.as_ref()),
+                            create_new_recursive_req(
+                                &inner_req,
+                                messages,
+                                resp.usage.as_ref(),
+                                &self.context_config,
+                            ),
                             recursion_limit.map(|r| r - 1),
                         )
                         .await?;
@@ -399,6 +409,7 @@ impl ToolUsingChat {
                 Arc::clone(&self.rt),
                 self.tools.clone(),
                 self.recursion_limit.map(|r| r - 1),
+                self.context_config.clone(),
             ),
             req,
             s,
@@ -467,12 +478,20 @@ impl Chat for ToolUsingChat {
 /// Create a new [`CreateChatCompletionRequest`] with new messages.
 ///
 /// Remove `tool_choice` if it is named (since it was just used), and set it to `Auto`.
+/// Applies context management (pruning + budget awareness) when usage data is available.
 fn create_new_recursive_req(
     req: &CreateChatCompletionRequest,
-    new_msg: Vec<ChatCompletionRequestMessage>,
+    mut new_msg: Vec<ChatCompletionRequestMessage>,
     marginal_usage: Option<&CompletionUsage>,
+    context_config: &ContextConfig,
 ) -> CreateChatCompletionRequest {
     let mut new_req = req.clone();
+
+    // Context management: prune old tool outputs and inject budget status if needed.
+    if let Some(usage) = marginal_usage {
+        manage_chat_context(context_config, &mut new_msg, usage.prompt_tokens);
+    }
+
     new_req.messages = new_msg;
 
     // Remove tool_choice if it is named (since it was just used), and set it to `Auto`.
@@ -760,6 +779,7 @@ fn make_a_stream(
                                         &req,
                                         new_messages,
                                         response.usage.as_ref(),
+                                        &model.context_config,
                                     ))
                                     .await
                                 {

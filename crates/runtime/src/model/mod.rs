@@ -21,6 +21,7 @@ use std::result::Result;
 use std::sync::Arc;
 
 mod chat;
+pub(crate) mod context;
 mod embed;
 pub(crate) mod eval;
 mod metrics;
