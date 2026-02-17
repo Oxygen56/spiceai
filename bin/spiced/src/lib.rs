@@ -151,6 +151,13 @@ pub async fn register_external_connectors() {
     )
     .await;
 
+    #[cfg(feature = "prometheus")]
+    register_connector_factory(
+        connector_prometheus::CONNECTOR_NAME,
+        connector_prometheus::factory(),
+    )
+    .await;
+
     #[cfg(feature = "scylladb")]
     register_connector_factory(
         connector_scylladb::CONNECTOR_NAME,

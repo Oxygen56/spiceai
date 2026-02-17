@@ -82,6 +82,7 @@ pub mod cdc;
 pub mod delete;
 pub mod graphql;
 pub mod http;
+pub mod prometheus;
 #[cfg(feature = "imap")]
 pub mod imap;
 pub mod index_maintenance;

@@ -29,6 +29,7 @@ connector-nfs = { path = "../../crates/data-connectors/connector-nfs", optional 
 connector-odbc = { path = "../../crates/data-connectors/connector-odbc", optional = true }
 connector-oracle = { path = "../../crates/data-connectors/connector-oracle", optional = true }
 connector-postgres = { path = "../../crates/data-connectors/connector-postgres", optional = true }
+connector-prometheus = { path = "../../crates/data-connectors/connector-prometheus", optional = true }
 connector-scylladb = { path = "../../crates/data-connectors/connector-scylladb", optional = true }
 connector-sharepoint = { path = "../../crates/data-connectors/connector-sharepoint", optional = true }
 connector-smb = { path = "../../crates/data-connectors/connector-smb", optional = true }
@@ -106,6 +107,7 @@ default = [
     "smb",
     "pingora",
     "scylladb",
+    "prometheus",
     "models",
 ]
 delta_lake = ["connector-delta-lake", "runtime/delta_lake"]
@@ -131,6 +133,7 @@ odbc = ["connector-odbc"]
 oracle = ["connector-oracle", "runtime/oracle"]
 pingora = ["runtime/pingora"]
 postgres = ["connector-postgres", "runtime/postgres"]
+prometheus = ["connector-prometheus"]
 postgres-accel = ["runtime/postgres-accel"]
 postgres-write = ["runtime/postgres-write"]
 release = []

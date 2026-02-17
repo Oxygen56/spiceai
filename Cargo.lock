@@ -4197,6 +4197,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-prometheus"
+version = "2.0.0-unstable"
+dependencies = [
+ "async-trait",
+ "data_components",
+ "datafusion",
+ "runtime",
+ "snafu",
+ "token_provider",
+ "url",
+]
+
+[[package]]
 name = "connector-scylladb"
 version = "2.0.0-unstable"
 dependencies = [
@@ -18264,6 +18277,7 @@ dependencies = [
  "connector-odbc",
  "connector-oracle",
  "connector-postgres",
+ "connector-prometheus",
  "connector-scylladb",
  "connector-sftp",
  "connector-sharepoint",
