@@ -25,6 +25,7 @@ pub mod git;
 pub mod github;
 pub mod git_worktree;
 pub mod grep;
+pub mod http_tool;
 pub mod kubectl;
 pub mod list_datasets;
 pub mod list_file_sources;

@@ -47,6 +47,7 @@ use super::{
     github::GitHubTool,
     git_worktree::{GitWorktreeTool, WorktreeTracker},
     grep::GrepTool,
+    http_tool::HttpTool,
     kubectl::KubectlTool,
     list_datasets::ListDatasetsTool,
     list_file_sources::ListFileSourcesTool,
@@ -250,6 +251,7 @@ impl BuiltinToolCatalog {
             "debug",
             "fail",
             "github",
+            "http_tool",
             "approval",
             "approval_slack",
             "approval_ms_teams",
@@ -297,6 +299,9 @@ impl BuiltinToolCatalog {
             ("debug", None) => "Print a debug message to the task history log",
             ("fail", None) => "Signal that this step cannot be completed due to invalid or missing information",
             ("github", None) => "Interact with GitHub repositories: milestones, pull requests, commits, and issues. IMPORTANT: Always use the 'fields' parameter to request only the specific fields you need (e.g. [\"number\", \"title\", \"state\"]). Request as few fields as possible to satisfy your task.",
+            ("http_tool", None) => {
+                "Make HTTP requests to external services and APIs"
+            }
             ("approval", None) => {
                 "Request human approval before proceeding with an action"
             }
@@ -716,6 +721,10 @@ impl BuiltinToolCatalog {
                         .context(FailedToConstructToolSnafu { id: id.to_string() })?,
                 ))
             }
+            "http_tool" => Ok(Arc::new(
+                HttpTool::try_new(Some(name), Some(description), params)
+                    .context(FailedToConstructToolSnafu { id: id.to_string() })?,
+            )),
             _ => Err(Error::UnknownBuiltinTool { id: id.to_string() }),
         }
     }
