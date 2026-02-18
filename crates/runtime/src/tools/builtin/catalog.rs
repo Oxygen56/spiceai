@@ -284,7 +284,7 @@ impl BuiltinToolCatalog {
                 "Get top N samples from a Spice.ai dataset based on a specified ordering"
             }
             ("list_datasets", None) => "List available datasets",
-            ("list_file_sources", None) => "List available file sources and their local paths",
+            ("list_file_sources", None) => "List available file sources and their local paths. This includes github repositories",
             ("grep", None) => "Search for a pattern in files within configured directories",
             ("read_file", None) => "Read the contents of a file at the given path",
             ("list_files", None) => "List files and directories at the given path",
