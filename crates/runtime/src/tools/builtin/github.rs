@@ -32,8 +32,9 @@ const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct GitHubToolParams {
     /// The GitHub operation: "list_milestones", "get_milestone", "list_milestone_issues",
-    /// "create_pull_request", "get_pull_request", "add_issue_to_milestone", "list_commits",
-    /// "compare", "api_get", "api_post", "api_patch", "graphql".
+    /// "list_milestone_pull_requests", "create_pull_request", "get_pull_request",
+    /// "add_issue_to_milestone", "list_commits", "compare", "api_get", "api_post",
+    /// "api_patch", "graphql".
     operation: String,
 
     /// Milestone title or number (for milestone operations).
@@ -83,6 +84,7 @@ const KNOWN_OPERATIONS: &[&str] = &[
     "list_milestones",
     "get_milestone",
     "list_milestone_issues",
+    "list_milestone_pull_requests",
     "create_pull_request",
     "get_pull_request",
     "add_issue_to_milestone",
@@ -304,25 +306,9 @@ impl GitHubTool {
         &self,
         params: &GitHubToolParams,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        // Determine the milestone number. If `number` is provided directly, use it.
-        // If `milestone` is a numeric string, parse it.
-        // Otherwise, treat it as a title and search for it.
-        let milestone_number: u64 = if let Some(n) = params.number {
-            n
-        } else if let Some(ref ms) = params.milestone {
-            if let Ok(n) = ms.parse::<u64>() {
-                n
-            } else {
-                // Search by title: list all milestones and find by title
-                self.find_milestone_number_by_title(ms).await?
-            }
-        } else {
-            return Err(
-                "get_milestone requires a 'milestone' (title or number) or 'number' parameter"
-                    .to_string()
-                    .into(),
-            );
-        };
+        let milestone_number = self
+            .resolve_milestone_number(params, "get_milestone")
+            .await?;
 
         let path = format!(
             "/repos/{}/{}/milestones/{milestone_number}",
@@ -331,79 +317,115 @@ impl GitHubTool {
         self.api_get(&path, &[]).await
     }
 
+    /// Resolve a milestone number from the params (by direct number or title lookup).
+    async fn resolve_milestone_number(
+        &self,
+        params: &GitHubToolParams,
+        operation: &str,
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(n) = params.number {
+            Ok(n)
+        } else if let Some(ref ms) = params.milestone {
+            if let Ok(n) = ms.parse::<u64>() {
+                Ok(n)
+            } else {
+                self.find_milestone_number_by_title(ms).await
+            }
+        } else {
+            Err(format!(
+                "{operation} requires a 'milestone' (title or number) or 'number' parameter"
+            )
+            .into())
+        }
+    }
+
+    /// Fetch all items (issues + PRs) for a milestone from the REST API.
+    async fn fetch_milestone_items(
+        &self,
+        milestone_number: u64,
+        per_page: u32,
+    ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+        let path = format!("/repos/{}/{}/issues", self.owner, self.repo);
+        let per_page = per_page.to_string();
+        let ms_str = milestone_number.to_string();
+        let items = self
+            .api_get(
+                &path,
+                &[
+                    ("milestone", &ms_str),
+                    ("state", "all"),
+                    ("per_page", &per_page),
+                ],
+            )
+            .await?;
+
+        items
+            .as_array()
+            .cloned()
+            .ok_or_else(|| "Expected milestone items to be an array".into())
+    }
+
     async fn handle_list_milestone_issues(
         &self,
         params: &GitHubToolParams,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        // Resolve milestone number from either `number`, numeric `milestone`, or title.
-        let milestone_number: u64 = if let Some(n) = params.number {
-            n
-        } else if let Some(ref ms) = params.milestone {
-            if let Ok(n) = ms.parse::<u64>() {
-                n
-            } else {
-                self.find_milestone_number_by_title(ms).await?
-            }
-        } else {
-            return Err(
-                "list_milestone_issues requires a 'milestone' (title or number) or 'number' parameter"
-                    .to_string()
-                    .into(),
-            );
-        };
+        let milestone_number = self
+            .resolve_milestone_number(params, "list_milestone_issues")
+            .await?;
 
-        // Use GraphQL to fetch milestone PRs with merge commit SHAs in a single query.
-        // The REST Issues API doesn't return merge_commit_sha; only the Pulls API / GraphQL do.
-        let query = r#"
-            query($owner: String!, $repo: String!, $milestone_number: Int!) {
-              repository(owner: $owner, name: $repo) {
-                milestone(number: $milestone_number) {
-                  pullRequests(first: 100, states: [MERGED], orderBy: {field: CREATED_AT, direction: ASC}) {
-                    nodes {
-                      number
-                      title
-                      mergeCommit { oid }
-                      mergedAt
-                    }
-                  }
-                }
-              }
-            }
-        "#;
+        let items = self
+            .fetch_milestone_items(milestone_number, params.per_page.unwrap_or(100))
+            .await?;
 
-        let variables = json!({
-            "owner": self.owner,
-            "repo": self.repo,
-            "milestone_number": milestone_number,
-        });
-
-        let data = self.api_graphql(query, variables).await?;
-
-        let nodes = data
-            .pointer("/repository/milestone/pullRequests/nodes")
-            .and_then(|n| n.as_array())
-            .ok_or("No pull requests found for milestone")?;
-
-        let mut items: Vec<Value> = nodes
+        let results: Vec<Value> = items
             .iter()
-            .map(|pr| {
+            .filter(|item| item.get("pull_request").is_none())
+            .map(|item| {
                 json!({
-                    "number": pr.get("number"),
-                    "title": pr.get("title"),
-                    "merge_commit_sha": pr.pointer("/mergeCommit/oid"),
-                    "merged_at": pr.get("mergedAt"),
+                    "number": item.get("number"),
+                    "title": item.get("title"),
+                    "state": item.get("state"),
                 })
             })
             .collect();
 
-        // Sort by merged_at ascending (oldest first = correct cherry-pick order).
-        items.sort_by(|a, b| {
-            let a_time = a.get("merged_at").and_then(|v| v.as_str()).unwrap_or("");
-            let b_time = b.get("merged_at").and_then(|v| v.as_str()).unwrap_or("");
-            a_time.cmp(b_time)
-        });
+        Ok(json!(results))
+    }
 
-        Ok(json!(items))
+    async fn handle_list_milestone_pull_requests(
+        &self,
+        params: &GitHubToolParams,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let milestone_number = self
+            .resolve_milestone_number(params, "list_milestone_pull_requests")
+            .await?;
+
+        let items = self
+            .fetch_milestone_items(milestone_number, params.per_page.unwrap_or(100))
+            .await?;
+
+        let mut results = Vec::new();
+        for item in &items {
+            if item.get("pull_request").is_none() {
+                continue;
+            }
+            let number = item["number"].as_u64().unwrap_or(0);
+            let pr_path = format!(
+                "/repos/{}/{}/pulls/{number}",
+                self.owner, self.repo
+            );
+            let pr = self.api_get(&pr_path, &[]).await?;
+            results.push(json!({
+                "number": number,
+                "title": item.get("title"),
+                "state": item.get("state"),
+                "merged": pr.get("merged"),
+                "merge_commit_sha": pr.get("merge_commit_sha"),
+                "merged_at": pr.get("merged_at"),
+            }));
+        }
+
+        Ok(json!(results))
     }
 
     async fn handle_compare(
@@ -733,6 +755,9 @@ impl SpiceModelTool for GitHubTool {
                 "list_milestones" => self.handle_list_milestones(&params).await,
                 "get_milestone" => self.handle_get_milestone(&params).await,
                 "list_milestone_issues" => self.handle_list_milestone_issues(&params).await,
+                "list_milestone_pull_requests" => {
+                    self.handle_list_milestone_pull_requests(&params).await
+                }
                 "list_commits" => self.handle_list_commits(&params).await,
                 "compare" => self.handle_compare(&params).await,
                 "create_pull_request" => self.handle_create_pull_request(&params).await,
