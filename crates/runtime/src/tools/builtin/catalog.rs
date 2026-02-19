@@ -298,7 +298,7 @@ impl BuiltinToolCatalog {
             }
             ("debug", None) => "Print a debug message to the task history log",
             ("fail", None) => "Signal that this step cannot be completed due to invalid or missing information",
-            ("github", None) => "Interact with GitHub repositories: milestones, pull requests, commits, and issues. IMPORTANT: Always use the 'fields' parameter to request only the specific fields you need (e.g. [\"number\", \"title\", \"state\"]). Request as few fields as possible to satisfy your task.",
+            ("github", None) => "Access the GitHub REST API. Works like `gh api` — provide an endpoint, optional HTTP method, and optional parameters. Relative endpoint paths are auto-prefixed with /repos/{owner}/{repo}/. See https://docs.github.com/en/rest for API reference.",
             ("http_tool", None) => {
                 "Make HTTP requests to external services and APIs"
             }
