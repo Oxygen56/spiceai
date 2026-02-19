@@ -106,6 +106,18 @@ struct Delta {
     content: Option<String>,
 }
 
+/// An SSE error event from the server.
+#[derive(Deserialize)]
+struct SseError {
+    error: SseErrorBody,
+}
+
+/// Error body within an SSE error event.
+#[derive(Deserialize)]
+struct SseErrorBody {
+    message: String,
+}
+
 /// Token usage statistics.
 #[derive(Deserialize, Default, Clone)]
 #[expect(clippy::struct_field_names)]
@@ -430,12 +442,24 @@ async fn send_chat_streaming(
     let mut usage: Option<Usage> = None;
 
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| {
-            InvalidResponseSnafu {
-                message: format!("Failed to read stream: {e}"),
+        let chunk = match chunk_result {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                // Stream read error — stop reading but return any partial response
+                // instead of aborting with a cryptic error.
+                if let Some(s) = spinner.take() {
+                    s.stop().await;
+                }
+                if full_response.is_empty() {
+                    return Err(InvalidResponseSnafu {
+                        message: format!("Failed to read stream: {e}"),
+                    }
+                    .build());
+                }
+                eprintln!("\n\x1b[33mWarning:\x1b[0m Stream interrupted: {e}");
+                break;
             }
-            .build()
-        })?;
+        };
 
         let text = String::from_utf8_lossy(&chunk);
 
@@ -467,6 +491,12 @@ async fn send_chat_streaming(
                             full_response.push_str(content);
                         }
                     }
+                } else if let Ok(sse_error) = serde_json::from_str::<SseError>(data) {
+                    // Handle SSE error events from the server.
+                    if let Some(s) = spinner.take() {
+                        s.stop().await;
+                    }
+                    eprintln!("\n\x1b[31mError:\x1b[0m {}", sse_error.error.message);
                 }
             }
         }

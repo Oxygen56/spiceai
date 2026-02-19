@@ -28,6 +28,7 @@ pub mod chat;
 pub mod embed;
 pub mod list_models;
 pub mod responses;
+mod responses_compat;
 
 pub use list_models::OpenAiModelLister;
 
@@ -217,5 +218,12 @@ impl<C: Config + Clone> Openai<C> {
             && (self.model.starts_with("gpt-5")
                 || self.model.starts_with("o3")
                 || self.model.starts_with("o4"))
+    }
+
+    /// Returns true if this model only supports the Responses API (not chat/completions).
+    /// Codex variants and gpt-5.2-pro require `/v1/responses` and reject `/v1/chat/completions`.
+    fn is_responses_only(&self) -> bool {
+        self.client.config().api_base() == OPENAI_API_BASE
+            && (self.model.contains("codex") || self.model == "gpt-5.2-pro")
     }
 }

@@ -23,6 +23,7 @@ use std::task::{Context, Poll};
 use itertools::Itertools;
 use llms::chat::nsql::SqlGeneration;
 use llms::chat::{Chat, Result as ChatResult};
+use llms::streaming_utils::{create_stream_choice, create_stream_response, generate_stream_id};
 
 use async_openai::error::OpenAIError;
 use async_openai::types::chat::{
@@ -32,7 +33,7 @@ use async_openai::types::chat::{
     ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionToolChoiceOption,
     ChatCompletionTools, CompletionTokensDetails, CompletionUsage, CreateChatCompletionRequest,
     CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FinishReason, FunctionCall,
-    FunctionObject, PromptTokensDetails, ToolChoiceOptions,
+    FunctionObject, PromptTokensDetails, Role, ToolChoiceOptions,
 };
 
 use async_trait::async_trait;
@@ -664,15 +665,22 @@ fn make_a_stream(
                 > = Arc::new(Mutex::new(HashMap::new()));
 
                 let mut chat_output = String::new();
+                let stream_id = generate_stream_id(&req.model);
 
                 while let Some(result) = s.next().await {
                     let response = match result {
                         Ok(response) => response,
                         Err(e) => {
-                            if let Err(e) = sender_clone.send(Err(e)).await
-                                && !sender_clone.is_closed() {
-                                    tracing::error!("Error sending error: {}", e);
-                                }
+                            tracing::error!("Error in chat completion stream: {e}");
+                            let error_msg = format!("An error occurred: {e}");
+                            if let Ok(error_resp) = create_stream_response(
+                                &stream_id,
+                                &req.model,
+                                vec![create_stream_choice(0, Some(error_msg), Some(Role::Assistant), Some(FinishReason::Stop))],
+                                None,
+                            ) {
+                                let _ = sender_clone.send(Ok(error_resp)).await;
+                            }
                             return;
                         }
                     };
@@ -766,10 +774,16 @@ fn make_a_stream(
                                         continue;
                                     }
                                     Err(e) => {
-                                        if let Err(e) = sender_clone.send(Err(e)).await
-                                            && !sender_clone.is_closed() {
-                                                tracing::error!("Error sending error: {}", e);
-                                            }
+                                        tracing::error!("Error processing tool calls: {e}");
+                                        let error_msg = format!("An error occurred while processing tool calls: {e}");
+                                        if let Ok(error_resp) = create_stream_response(
+                                            &stream_id,
+                                            &req.model,
+                                            vec![create_stream_choice(0, Some(error_msg), Some(Role::Assistant), Some(FinishReason::Stop))],
+                                            None,
+                                        ) {
+                                            let _ = sender_clone.send(Ok(error_resp)).await;
+                                        }
                                         return;
                                     }
                                 };
@@ -795,10 +809,16 @@ fn make_a_stream(
                                         }
                                     }
                                     Err(e) => {
-                                        if let Err(e) = sender_clone.send(Err(e)).await
-                                            && !sender_clone.is_closed() {
-                                                tracing::error!("Error sending error: {}", e);
-                                            }
+                                        tracing::error!("Error from recursive chat_stream: {e}");
+                                        let error_msg = format!("An error occurred: {e}");
+                                        if let Ok(error_resp) = create_stream_response(
+                                            &stream_id,
+                                            &req.model,
+                                            vec![create_stream_choice(0, Some(error_msg), Some(Role::Assistant), Some(FinishReason::Stop))],
+                                            None,
+                                        ) {
+                                            let _ = sender_clone.send(Ok(error_resp)).await;
+                                        }
                                         return;
                                     }
                                 }

@@ -35,6 +35,15 @@ fn supports_responses_api(m: &SpicepodModel, params: &HashMap<String, SecretStri
         return true;
     }
 
+    // Responses-only OpenAI models (codex variants, gpt-5.2-pro)
+    if m.get_source() == Some(ModelSource::OpenAi) {
+        if let Some(model_id) = m.get_model_id() {
+            if model_id.contains("codex") || model_id == "gpt-5.2-pro" {
+                return true;
+            }
+        }
+    }
+
     params
         .get("responses_api")
         .map(secrecy::ExposeSecret::expose_secret)
