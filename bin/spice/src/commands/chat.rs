@@ -391,8 +391,13 @@ async fn send_chat_streaming(
         }),
     };
 
-    let mut request = ctx
-        .http_client()
+    // Use a client without timeout for SSE streaming — tool-use loops can take
+    // minutes, and the server-side SSE keep-alive handles idle detection.
+    let streaming_client = reqwest::Client::builder()
+        .build()
+        .unwrap_or_default();
+
+    let mut request = streaming_client
         .post(&url)
         .header("Content-Type", "application/json")
         .header("Accept", "text/event-stream")

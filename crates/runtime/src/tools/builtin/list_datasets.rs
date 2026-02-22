@@ -18,6 +18,7 @@ use crate::{
     datafusion::{SPICE_DEFAULT_CATALOG, SPICE_DEFAULT_SCHEMA},
     tools::SpiceModelTool,
 };
+use tools::ToolCapability;
 use async_trait::async_trait;
 use datafusion::sql::TableReference;
 use itertools::Itertools;
@@ -72,6 +73,10 @@ impl SpiceModelTool for ListDatasetsTool {
 
     fn parameters(&self) -> Option<Value> {
         None
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

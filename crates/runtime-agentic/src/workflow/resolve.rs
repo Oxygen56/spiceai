@@ -57,15 +57,37 @@ pub fn resolve_workflow(
         .map(|step| resolve_step(step, available_read_tools, available_write_tools))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let plan_mode = agent
+        .planning
+        .as_ref()
+        .is_some_and(|p| p.start_in_plan_mode);
+
+    let system_prompt = if plan_mode {
+        format!(
+            "{}\n\n## Planning Mode\n\n\
+             You have access to planning mode tools. When in plan mode, only read-only tools \
+             (queries, searches, file reads) are available. Write tools are unlocked after you \
+             exit plan mode.\n\n\
+             - `enter_plan_mode(reason)` \u{2014} Switch to read-only mode to research and plan.\n\
+             - `exit_plan_mode(plan)` \u{2014} Present your plan and unlock all tools.\n\n\
+             You start in plan mode. Gather information using read-only tools, then call \
+             exit_plan_mode with your plan before executing write operations.",
+            agent.prompt
+        )
+    } else {
+        agent.prompt.clone()
+    };
+
     Ok(ResolvedWorkflow {
         name: pipeline_config.name.clone(),
         agent_name: agent.name.clone(),
-        system_prompt: agent.prompt.clone(),
+        system_prompt,
         default_model: agent.model.clone(),
         steps,
         agent_read_tools,
         datasets: agent.datasets.clone(),
         file_sources: agent.file_sources.clone(),
+        plan_mode,
     })
 }
 
@@ -224,6 +246,7 @@ mod tests {
             read_tools: read_tools.into_iter().map(String::from).collect(),
             session: None,
             memory: None,
+            planning: None,
             pipelines: vec![],
             depends_on: vec![],
         }

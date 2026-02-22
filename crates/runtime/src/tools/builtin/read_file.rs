@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use snafu::ResultExt;
 use std::{borrow::Cow, fs, path::PathBuf};
-use tools::SpiceModelTool;
+use tools::{SpiceModelTool, ToolCapability};
 use tracing::Span;
 use tracing_futures::Instrument;
 
@@ -101,6 +101,10 @@ impl SpiceModelTool for ReadFileTool {
 
     fn parameters(&self) -> Option<Value> {
         parameters::<ReadFileToolParams>()
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

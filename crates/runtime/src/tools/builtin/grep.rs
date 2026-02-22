@@ -25,7 +25,7 @@ use std::{
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
 };
-use tools::SpiceModelTool;
+use tools::{SpiceModelTool, ToolCapability};
 use tracing::Span;
 use tracing_futures::Instrument;
 
@@ -235,6 +235,10 @@ impl SpiceModelTool for GrepTool {
 
     fn parameters(&self) -> Option<Value> {
         parameters::<GrepToolParams>()
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

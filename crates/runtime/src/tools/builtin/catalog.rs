@@ -591,7 +591,19 @@ impl BuiltinToolCatalog {
                             .map(|s| PathBuf::from(s.trim()))
                             .collect()
                     })
-                    .unwrap_or_else(|| vec![PathBuf::from(".")]);
+                    .unwrap_or_else(|| {
+                        let mut dirs = vec![];
+                        if let Some(repo) = params.get("repo_path") {
+                            dirs.push(PathBuf::from(repo.expose_secret()));
+                        }
+                        if let Some(wt_root) = params.get("worktree_root") {
+                            dirs.push(PathBuf::from(wt_root.expose_secret()));
+                        }
+                        if dirs.is_empty() {
+                            dirs.push(PathBuf::from("."));
+                        }
+                        dirs
+                    });
                 Ok(Arc::new(
                     ClaudeCodeTool::try_new(
                         Some(name),
@@ -711,9 +723,18 @@ impl BuiltinToolCatalog {
                     .get("github_token")
                     .map(|v| v.expose_secret().to_string())
                     .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+                    .or_else(|| std::env::var("GH_TOKEN").ok())
+                    .or_else(|| {
+                        std::process::Command::new("gh")
+                            .args(["auth", "token"])
+                            .output()
+                            .ok()
+                            .filter(|o| o.status.success())
+                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    })
                     .ok_or_else(|| Error::FailedToConstructTool {
                         id: id.to_string(),
-                        source: "Missing 'github_token' parameter and GITHUB_TOKEN env var not set"
+                        source: "Missing 'github_token' parameter, GITHUB_TOKEN/GH_TOKEN env var not set, and 'gh auth token' failed"
                             .into(),
                     })?;
                 Ok(Arc::new(

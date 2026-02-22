@@ -34,6 +34,7 @@ use crate::{
     tools::{SpiceModelTool, utils::parameters},
 };
 use runtime_request_context::{AsyncMarker, RequestContext};
+use tools::ToolCapability;
 
 pub struct SearchTool {
     name: String,
@@ -72,6 +73,10 @@ impl SpiceModelTool for SearchTool {
 
     fn parameters(&self) -> Option<Value> {
         parameters::<SearchRequestBaseJson>()
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

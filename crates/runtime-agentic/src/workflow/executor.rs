@@ -183,6 +183,7 @@ async fn execute_workflow_inner(
                             &step.required_write_tools,
                             &optional_tools,
                             step.max_iterations,
+                            workflow.plan_mode,
                         )
                         .await
                 }
@@ -412,6 +413,7 @@ mod tests {
             _required_tools: &[std::sync::Arc<dyn tools::SpiceModelTool>],
             _optional_tools: &[std::sync::Arc<dyn tools::SpiceModelTool>],
             _max_iterations: usize,
+            _plan_mode: bool,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             Ok(format!(
                 "Response to: {}",
@@ -439,6 +441,7 @@ mod tests {
             agent_read_tools: vec![],
             datasets: vec![],
             file_sources: vec![],
+            plan_mode: false,
         };
 
         let session_store = InMemorySessionStore::new();
@@ -502,6 +505,7 @@ mod tests {
             agent_read_tools: vec![],
             datasets: vec![],
             file_sources: vec![],
+            plan_mode: false,
         };
 
         let session_store = InMemorySessionStore::new();

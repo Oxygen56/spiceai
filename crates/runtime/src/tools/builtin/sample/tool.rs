@@ -17,6 +17,7 @@ use crate::{
     datafusion::DataFusion,
     tools::{SpiceModelTool, utils::parameters},
 };
+use tools::ToolCapability;
 use arrow::util::pretty::pretty_format_batches;
 use arrow_tools::record_batch::{truncate_numeric_column_length, truncate_string_columns};
 use async_trait::async_trait;
@@ -95,6 +96,10 @@ impl SpiceModelTool for SampleDataTool {
             SampleTableMethod::RandomSample => parameters::<RandomSampleParams>(),
             SampleTableMethod::TopNSample => parameters::<TopSamplesParams>(),
         }
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

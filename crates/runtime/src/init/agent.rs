@@ -25,11 +25,14 @@ use async_openai::types::chat::{
     CreateChatCompletionRequestArgs, FunctionObject,
 };
 use async_trait::async_trait;
-use itertools::Itertools;
 use tools::SpiceModelTool;
 use tracing_futures::Instrument;
 
 use crate::tools::builtin::fail::FailTool;
+use crate::tools::builtin::plan_mode::{
+    EnterPlanModeTool, ExitPlanModeTool, ENTER_PLAN_MODE_TOOL_NAME, EXIT_PLAN_MODE_TOOL_NAME,
+};
+use tools::ToolCapability;
 
 use crate::memory::layers::{
     knowledge_base::KnowledgeBaseLayer, session::SessionLayer,
@@ -116,7 +119,8 @@ enum IterationOutcome {
     /// Model returned content without calling any tools — iteration is done.
     Done(String, HashSet<String>),
     /// Model called tools and results were fed back — continue looping.
-    Continue(HashSet<String>),
+    /// The `Option<bool>` carries an optional plan mode state change.
+    Continue(HashSet<String>, Option<bool>),
 }
 
 /// A `ModelCaller` that looks up models from the runtime's `completion_llms` store.
@@ -183,17 +187,20 @@ impl RuntimeModelCaller {
     /// Run a single model call with tool-calling loop. Returns (content, set of tools called).
     ///
     /// If the model calls the `fail` tool, returns an error immediately.
+    /// If `initial_plan_mode` is true, only read-only tools are presented to the model
+    /// until `exit_plan_mode` is called.
     async fn call_with_tool_loop(
         model: &Arc<dyn llms::chat::Chat>,
         step_name: &str,
         model_name: &str,
         messages: Vec<ChatCompletionRequestMessage>,
-        tool_schemas: &[ChatCompletionTools],
         all_step_tools: &[Arc<dyn SpiceModelTool>],
         max_iterations: usize,
+        initial_plan_mode: bool,
     ) -> Result<(String, HashSet<String>), Box<dyn std::error::Error + Send + Sync>> {
         let mut current_messages = messages;
         let mut tools_called = HashSet::new();
+        let mut plan_mode = initial_plan_mode;
 
         for iteration in 0..max_iterations {
             tracing::debug!(
@@ -211,16 +218,28 @@ impl RuntimeModelCaller {
             );
 
             let iter_result: Result<IterationOutcome, Box<dyn std::error::Error + Send + Sync>> = async {
+                // Filter tools based on plan mode
+                let active_tools: Vec<Arc<dyn SpiceModelTool>> = if plan_mode {
+                    all_step_tools
+                        .iter()
+                        .filter(|t| t.capability() == ToolCapability::ReadOnly)
+                        .cloned()
+                        .collect()
+                } else {
+                    all_step_tools.to_vec()
+                };
+                let active_schemas = Self::tools_to_schemas(&active_tools);
+
                 let mut req_builder = CreateChatCompletionRequestArgs::default();
                 req_builder.model(model_name).messages(current_messages.clone());
-                if !tool_schemas.is_empty() {
-                    req_builder.tools(tool_schemas.to_vec());
+                if !active_schemas.is_empty() {
+                    req_builder.tools(active_schemas);
                 }
                 let req = req_builder.build()?;
 
                 let response = model.chat_request(req).await?;
 
-                // Check for step-level tool calls
+                // Check for step-level tool calls (against all tools, not just active)
                 let step_tool_calls = Self::extract_step_tool_calls(&response, all_step_tools);
 
                 if step_tool_calls.is_empty() {
@@ -263,10 +282,11 @@ impl RuntimeModelCaller {
                 current_messages.push(assistant_message);
 
                 let mut iter_tools = HashSet::new();
+                let mut new_plan_mode: Option<bool> = None;
 
                 for tool_call in &step_tool_calls {
-                    // Check for `fail` tool — short-circuit immediately
                     if let Some(tool) = Self::find_tool(all_step_tools, &tool_call.function.name) {
+                        // Check for `fail` tool — short-circuit immediately
                         if tool.name() == FAIL_TOOL_NAME {
                             let reason = serde_json::from_str::<serde_json::Value>(
                                 &tool_call.function.arguments,
@@ -281,6 +301,37 @@ impl RuntimeModelCaller {
                                 "Step failed via fail tool"
                             );
                             return Err(format!("Step failed: {reason}").into());
+                        }
+
+                        // Check for plan mode tools — toggle plan mode state
+                        if tool.name() == ENTER_PLAN_MODE_TOOL_NAME {
+                            let _ = tool.call(&tool_call.function.arguments).await;
+                            new_plan_mode = Some(true);
+                            let tool_message: ChatCompletionRequestMessage =
+                                ChatCompletionRequestToolMessageArgs::default()
+                                    .content("Plan mode activated. Only read-only tools are now available. Use read-only tools to research and gather information, then call exit_plan_mode with your plan.")
+                                    .tool_call_id(tool_call.id.clone())
+                                    .build()?
+                                    .into();
+                            current_messages.push(tool_message);
+                            continue;
+                        }
+                        if tool.name() == EXIT_PLAN_MODE_TOOL_NAME {
+                            let _ = tool.call(&tool_call.function.arguments).await;
+                            new_plan_mode = Some(false);
+                            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments) {
+                                if let Some(plan) = args.get("plan").and_then(|p| p.as_str()) {
+                                    println!("\n📋 Agent Plan:\n{plan}\n");
+                                }
+                            }
+                            let tool_message: ChatCompletionRequestMessage =
+                                ChatCompletionRequestToolMessageArgs::default()
+                                    .content("Plan mode deactivated. All tools are now available. You may proceed with your plan.")
+                                    .tool_call_id(tool_call.id.clone())
+                                    .build()?
+                                    .into();
+                            current_messages.push(tool_message);
+                            continue;
                         }
                     }
 
@@ -317,14 +368,17 @@ impl RuntimeModelCaller {
                     current_messages.push(tool_message);
                 }
 
-                Ok(IterationOutcome::Continue(iter_tools))
+                Ok(IterationOutcome::Continue(iter_tools, new_plan_mode))
             }
             .instrument(iter_span)
             .await;
 
             match iter_result? {
                 IterationOutcome::Done(content, _) => return Ok((content, tools_called)),
-                IterationOutcome::Continue(iter_tools) => {
+                IterationOutcome::Continue(iter_tools, plan_mode_change) => {
+                    if let Some(new_mode) = plan_mode_change {
+                        plan_mode = new_mode;
+                    }
                     let count = iter_tools.len();
                     tools_called.extend(iter_tools);
                     tracing::debug!(
@@ -355,6 +409,7 @@ impl ModelCaller for RuntimeModelCaller {
         required_tools: &[Arc<dyn SpiceModelTool>],
         optional_tools: &[Arc<dyn SpiceModelTool>],
         max_iterations: usize,
+        plan_mode: bool,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let llms = self.llms.read().await;
         let model = llms
@@ -366,11 +421,15 @@ impl ModelCaller for RuntimeModelCaller {
         // Auto-inject the fail tool + merge all step tools
         let fail_tool: Arc<dyn SpiceModelTool> = Arc::new(FailTool::new(None, None));
         let mut all_step_tools: Vec<Arc<dyn SpiceModelTool>> = vec![fail_tool];
+
+        // Auto-inject plan mode tools when plan mode is configured
+        if plan_mode {
+            all_step_tools.push(Arc::new(EnterPlanModeTool::new(None, None)));
+            all_step_tools.push(Arc::new(ExitPlanModeTool::new(None, None)));
+        }
+
         all_step_tools.extend(required_tools.iter().cloned());
         all_step_tools.extend(optional_tools.iter().cloned());
-
-        // Build tool schemas for the request
-        let tool_schemas = Self::tools_to_schemas(&all_step_tools);
 
         // Build the user message, injecting required tool instructions if needed
         let effective_user_message = if required_tools.is_empty() {
@@ -449,9 +508,9 @@ impl ModelCaller for RuntimeModelCaller {
                     step_name,
                     model_name,
                     attempt_messages,
-                    &tool_schemas,
                     &all_step_tools,
                     max_iterations,
+                    plan_mode,
                 )
                 .await?;
 

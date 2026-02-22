@@ -20,7 +20,7 @@ use crate::Runtime;
 use async_trait::async_trait;
 use serde_json::Value;
 use snafu::ResultExt;
-use tools::SpiceModelTool;
+use tools::{SpiceModelTool, ToolCapability};
 
 pub struct GetReadinessTool {
     name: String,
@@ -49,6 +49,10 @@ impl SpiceModelTool for GetReadinessTool {
     }
     fn parameters(&self) -> Option<Value> {
         None
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, _arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

@@ -19,7 +19,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::borrow::Cow;
-use tools::SpiceModelTool;
+use tools::{SpiceModelTool, ToolCapability};
 
 use crate::tools::utils::parameters;
 
@@ -58,6 +58,10 @@ impl SpiceModelTool for FailTool {
 
     fn parameters(&self) -> Option<Value> {
         parameters::<FailToolParams>()
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

@@ -21,6 +21,7 @@ use crate::tools::{
     builtin::web_search::{SearchEngineType, perplexity::PerplexityWebSearchParams},
     utils::parameters,
 };
+use tools::ToolCapability;
 use async_trait::async_trait;
 use secrecy::SecretString;
 use serde_json::Value;
@@ -70,6 +71,10 @@ impl SpiceModelTool for WebSearchTool {
         match self.engine.engine_type() {
             SearchEngineType::Perplexity => parameters::<PerplexityWebSearchParams>(),
         }
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

@@ -41,6 +41,8 @@ pub struct ResolvedWorkflow {
     pub agent_read_tools: Vec<Arc<dyn SpiceModelTool>>,
     pub datasets: Vec<String>,
     pub file_sources: Vec<String>,
+    /// Whether the workflow starts in plan mode (read-only tools only).
+    pub plan_mode: bool,
 }
 
 impl std::fmt::Debug for ResolvedWorkflow {

@@ -31,6 +31,7 @@ pub mod list_datasets;
 pub mod list_file_sources;
 pub mod list_files;
 pub mod ms_teams;
+pub mod plan_mode;
 pub mod read_file;
 pub mod sample;
 pub mod search;

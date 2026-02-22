@@ -21,6 +21,7 @@ use crate::{
     datafusion::DataFusion,
     tools::{SpiceModelTool, utils::parameters},
 };
+use tools::ToolCapability;
 use futures::TryStreamExt;
 use runtime_datafusion::allowlist::ResolvedTableAwareAllowlist;
 use schemars::JsonSchema;
@@ -72,6 +73,10 @@ impl SpiceModelTool for SqlTool {
 
     fn parameters(&self) -> Option<Value> {
         parameters::<SqlToolParams>()
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

@@ -45,12 +45,28 @@ pub struct Agent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning: Option<PlanningModeConfig>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pipelines: Vec<PipelineConfig>,
 
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(rename = "dependsOn", default)]
     pub depends_on: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schemars", derive(JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PlanningModeConfig {
+    /// Whether the agent starts in plan mode. Default: true.
+    #[serde(default = "default_true")]
+    pub start_in_plan_mode: bool,
 }
 
 impl Nameable for Agent {
@@ -70,6 +86,7 @@ impl WithDependsOn<Agent> for Agent {
             read_tools: self.read_tools.clone(),
             session: self.session.clone(),
             memory: self.memory.clone(),
+            planning: self.planning.clone(),
             pipelines: self.pipelines.clone(),
             depends_on: depends_on.to_vec(),
         }

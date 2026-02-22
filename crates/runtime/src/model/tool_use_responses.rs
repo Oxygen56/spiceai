@@ -232,9 +232,28 @@ impl ToolUsingResponses {
                     .content(t.arguments.clone())
                     .to_jsonl(),
             );
+            tracing::info!(tool = %t.name, args = %t.arguments, "Calling tool");
             let content = self.call_tool(&t).await;
+            let result_preview = match &content {
+                Value::String(s) => s.chars().take(200).collect::<String>(),
+                other => other.to_string().chars().take(200).collect::<String>(),
+            };
+            tracing::info!(tool = %t.name, result_chars = result_preview.len(), result = %result_preview, "Tool returned");
             tool_and_response_content.push((t, content));
         }
+
+        let total_result_chars: usize = tool_and_response_content
+            .iter()
+            .map(|(_, v)| match v {
+                Value::String(s) => s.len(),
+                other => other.to_string().len(),
+            })
+            .sum();
+        tracing::info!(
+            tool_count = tool_and_response_content.len(),
+            total_result_chars,
+            "Sending tool results back to model"
+        );
 
         // Tell model the assistant used these tools, and provided result.
         let mut messages = original_messages.clone();
@@ -249,10 +268,10 @@ impl ToolUsingResponses {
             messages.push(InputItem::Item(Item::FunctionCallOutput(
                 FunctionCallOutputItemParam {
                     call_id: tool_call.id.clone().unwrap_or_default(),
-                    output: FunctionCallOutput::Text(
-                        serde_json::to_string(&response_content)
-                            .unwrap_or("Error calling tool.".to_string()),
-                    ),
+                    output: FunctionCallOutput::Text(match response_content {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    }),
                     id: Some(tool_call.name.clone()),
                     status: None,
                 },
@@ -287,19 +306,28 @@ impl ToolUsingResponses {
             }
 
             if recursion_limit.is_some_and(|f| f == 0) {
-                tracing::debug!(
-                    "Tool-use recursion limit reached. Will call model, but not process further"
+                tracing::warn!(
+                    "Tool-use recursion limit reached. Will call model, but not process further tool calls."
                 );
                 return self.inner_responses.responses_request(req).await;
             }
 
+            tracing::info!(recursion_remaining = recursion_limit, "Calling model (responses API)");
+
             // Append spiced runtime tools to the request.
             let inner_req = self.add_runtime_tools(&req);
 
-            let resp = self
+            let resp = match self
                 .inner_responses
                 .responses_request(inner_req.clone())
-                .await?;
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Model API request failed during tool-use loop");
+                    return Err(e);
+                }
+            };
 
             let usage = resp.usage.clone();
 
@@ -319,7 +347,7 @@ impl ToolUsingResponses {
             {
                 // New messages means we have run spice tools locally, ready to recall model.
                 Some(messages) => {
-                    let mut resp = self
+                    let mut resp = match self
                         .responses_request_inner(
                             create_new_recursive_req(
                                 &inner_req,
@@ -329,7 +357,14 @@ impl ToolUsingResponses {
                             ),
                             recursion_limit.map(|r| r - 1),
                         )
-                        .await?;
+                        .await
+                    {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Model API request failed after sending tool results");
+                            return Err(e);
+                        }
+                    };
                     resp.usage = combine_usage(usage, resp.usage);
                     Ok(resp)
                 }
@@ -356,19 +391,28 @@ impl ToolUsingResponses {
             }
 
             if recursion_limit.is_some_and(|f| f == 0) {
-                tracing::debug!(
-                    "Tool-use recursion limit reached. Will call model, but not process further"
+                tracing::warn!(
+                    "Tool-use recursion limit reached. Will call model, but not process further tool calls."
                 );
                 return self.inner_responses.responses_stream(req).await;
             }
 
+            tracing::info!(recursion_remaining = recursion_limit, "Calling model (responses API stream)");
+
             // Append spiced runtime tools to the request.
             let inner_req = self.add_runtime_tools(&req);
 
-            let s = self
+            let s = match self
                 .inner_responses
                 .responses_stream(inner_req.clone())
-                .await?;
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Model API stream request failed during tool-use loop");
+                    return Err(e);
+                }
+            };
 
             Ok(make_responses_stream(
                 Span::current(),

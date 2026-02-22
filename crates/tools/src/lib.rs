@@ -42,6 +42,9 @@ pub trait SpiceModelTool: Sync + Send {
         None
     }
     fn parameters(&self) -> Option<Value>;
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadWrite
+    }
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>>;
 
     /// If the tool is a proxy around an MCP tool, this method should return the proxy. Otherwise, it should return None.

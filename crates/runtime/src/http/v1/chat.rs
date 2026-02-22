@@ -55,7 +55,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{Instrument, Span};
 
 static SPICE_COMPLETION_PROGRESS_HEADER: &str = "x-spiceai-completion-progress";
-pub static KEEP_ALIVE_INTERVAL: u64 = 30;
+pub static KEEP_ALIVE_INTERVAL: u64 = 5;
 
 /// Create Chat Completion
 ///
@@ -285,6 +285,7 @@ fn create_sse_response(
     span: Span,
 ) -> Response {
     Sse::new(Box::pin(stream! {
+        tracing::info!("SSE stream started for chat completion");
         let mut chat_output = String::new();
         let mut id: Option<String> = None;
         while let Some(msg) = strm.next().instrument(span.clone()).await {
@@ -310,6 +311,7 @@ fn create_sse_response(
                 }
             }
         };
+        tracing::info!("SSE stream completed for chat completion");
         tracing::info!(target: "task_history", parent: &span, captured_output = %chat_output);
         if let Some(id) = id {
             tracing::info!(target: "task_history", parent: &span, id = %id, "labels");

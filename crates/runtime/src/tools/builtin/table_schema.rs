@@ -17,6 +17,7 @@ use crate::{
     Runtime,
     tools::{SpiceModelTool, utils::parameters},
 };
+use tools::ToolCapability;
 use app::App;
 use arrow_schema::{Field, Schema};
 use arrow_tools::format::table_schemas_to_markdown_table;
@@ -264,6 +265,10 @@ impl SpiceModelTool for TableSchemaTool {
     }
     fn parameters(&self) -> Option<Value> {
         parameters::<TableSchemaToolParams>()
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {

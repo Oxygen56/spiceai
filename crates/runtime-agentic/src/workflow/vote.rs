@@ -50,6 +50,7 @@ pub trait ModelCaller: Send + Sync {
         required_tools: &[Arc<dyn SpiceModelTool>],
         optional_tools: &[Arc<dyn SpiceModelTool>],
         max_iterations: usize,
+        plan_mode: bool,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
 }
 
@@ -81,7 +82,7 @@ pub async fn execute_vote_step(
             let model_name = model.clone();
             async move {
                 let result = caller
-                    .call_model(step_name, &model_name, "", &msg, &[], &[], 1)
+                    .call_model(step_name, &model_name, "", &msg, &[], &[], 1, false)
                     .await;
                 (model_name, result)
             }
@@ -139,7 +140,7 @@ pub async fn execute_vote_step(
 
     // 4. Judge model selects the best proposal.
     let judge_response = match caller
-        .call_model(step_name, judge_model, &judge_system, &judge_user_message, &[], &[], 1)
+        .call_model(step_name, judge_model, &judge_system, &judge_user_message, &[], &[], 1, false)
         .await
     {
         Ok(response) => response,
@@ -289,6 +290,7 @@ mod tests {
             _required_tools: &[Arc<dyn SpiceModelTool>],
             _optional_tools: &[Arc<dyn SpiceModelTool>],
             _max_iterations: usize,
+            _plan_mode: bool,
         ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
             match self.responses.get(model_name) {
                 Some(Ok(content)) => Ok(content.clone()),

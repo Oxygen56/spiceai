@@ -395,6 +395,10 @@ impl SpiceModelTool for GitTool {
         parameters::<GitToolParams>()
     }
 
+    fn capability(&self) -> ToolCapability {
+        self.capability
+    }
+
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let span: Span = tracing::span!(target: "task_history", tracing::Level::INFO, "tool_use::git", tool = self.name().to_string(), input = arg);
 

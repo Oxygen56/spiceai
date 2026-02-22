@@ -19,7 +19,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{borrow::Cow, sync::Arc};
-use tools::SpiceModelTool;
+use tools::{SpiceModelTool, ToolCapability};
 use tracing_futures::Instrument;
 
 use crate::Runtime;
@@ -70,6 +70,10 @@ impl SpiceModelTool for ListFileSourcesTool {
 
     fn parameters(&self) -> Option<Value> {
         parameters::<ListFileSourcesToolParams>()
+    }
+
+    fn capability(&self) -> ToolCapability {
+        ToolCapability::ReadOnly
     }
 
     async fn call(&self, arg: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
