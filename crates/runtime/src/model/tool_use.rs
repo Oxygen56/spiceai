@@ -48,6 +48,7 @@ use tracing::{Instrument, Span};
 use crate::Runtime;
 use crate::model::ModelContextExtension;
 use crate::model::context::{ContextConfig, manage_chat_context, truncate_tool_output};
+use crate::model::request_logger::RequestLogger;
 use llms::progress::Progress;
 use runtime_request_context::{AsyncMarker, RequestContext};
 
@@ -57,6 +58,7 @@ pub struct ToolUsingChat {
     tools: Vec<Arc<dyn SpiceModelTool>>,
     recursion_limit: Option<usize>,
     context_config: ContextConfig,
+    request_logger: Option<RequestLogger>,
 }
 
 impl ToolUsingChat {
@@ -74,6 +76,25 @@ impl ToolUsingChat {
             tools,
             recursion_limit,
             context_config,
+            request_logger: None,
+        }
+    }
+
+    fn new_with_logger(
+        inner_chat: Arc<dyn Chat>,
+        rt: Arc<Runtime>,
+        tools: Vec<Arc<dyn SpiceModelTool>>,
+        recursion_limit: Option<usize>,
+        context_config: ContextConfig,
+        request_logger: Option<RequestLogger>,
+    ) -> Self {
+        Self {
+            inner_chat,
+            rt,
+            tools,
+            recursion_limit,
+            context_config,
+            request_logger,
         }
     }
 
@@ -315,6 +336,9 @@ impl ToolUsingChat {
                 *c == ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::None)
             }) {
                 tracing::debug!("User asked for no tools, calling inner chat model");
+                if let Some(ref logger) = self.request_logger {
+                    logger.log_request(&req);
+                }
                 return self.inner_chat.chat_request(req).await;
             }
 
@@ -322,6 +346,9 @@ impl ToolUsingChat {
                 tracing::warn!(
                     "Tool-use recursion limit reached. Will call model, but not process further tool calls."
                 );
+                if let Some(ref logger) = self.request_logger {
+                    logger.log_request(&req);
+                }
                 return self.inner_chat.chat_request(req).await;
             }
 
@@ -330,6 +357,9 @@ impl ToolUsingChat {
             // Append spiced runtime tools to the request.
             let inner_req = self.add_runtime_tools(&req);
 
+            if let Some(ref logger) = self.request_logger {
+                logger.log_request(&inner_req);
+            }
             let resp = match self.inner_chat.chat_request(inner_req.clone()).await {
                 Ok(resp) => resp,
                 Err(e) => {
@@ -420,6 +450,9 @@ impl ToolUsingChat {
             .as_ref()
             .is_some_and(|c| *c == ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::None))
         {
+            if let Some(ref logger) = self.request_logger {
+                logger.log_request(&req);
+            }
             return self.inner_chat.chat_stream(req).await;
         }
 
@@ -427,6 +460,9 @@ impl ToolUsingChat {
             tracing::warn!(
                 "Tool-use recursion limit reached. Will call model, but not process further tool calls."
             );
+            if let Some(ref logger) = self.request_logger {
+                logger.log_request(&req);
+            }
             return self.inner_chat.chat_stream(req).await;
         }
 
@@ -434,17 +470,21 @@ impl ToolUsingChat {
 
         // Append spiced runtime tools to the request. Avoid clone if no runtime tools.
         let updated_req = self.add_runtime_tools(&req);
+        if let Some(ref logger) = self.request_logger {
+            logger.log_request(&updated_req);
+        }
         let s = self.inner_chat.chat_stream(updated_req.clone()).await?;
 
         Ok(make_a_stream(
             Span::current(),
             RequestContext::current(AsyncMarker::new().await),
-            Self::new(
+            Self::new_with_logger(
                 Arc::clone(&self.inner_chat),
                 Arc::clone(&self.rt),
                 self.tools.clone(),
                 self.recursion_limit.map(|r| r - 1),
                 self.context_config.clone(),
+                self.request_logger.clone(),
             ),
             req,
             s,
@@ -475,8 +515,18 @@ impl Chat for ToolUsingChat {
         }
         let inner_req = self.prepare_req(req).await?;
 
+        // Create a session-scoped instance with a fresh request logger.
+        let session = Self::new_with_logger(
+            Arc::clone(&self.inner_chat),
+            Arc::clone(&self.rt),
+            self.tools.clone(),
+            self.recursion_limit,
+            self.context_config.clone(),
+            Some(RequestLogger::new()),
+        );
+
         // wrap the completion stream to track the `ai_inferences_with_spice_count` when it is ready.
-        let stream = self.chat_stream_inner(inner_req).await?;
+        let stream = session.chat_stream_inner(inner_req).await?;
         Ok(Box::pin(InferenceTrackingStream::new(stream, context)))
     }
 
@@ -490,7 +540,18 @@ impl Chat for ToolUsingChat {
         }
 
         let inner_req = self.prepare_req(req).await?;
-        let response = self
+
+        // Create a session-scoped instance with a fresh request logger.
+        let session = Self::new_with_logger(
+            Arc::clone(&self.inner_chat),
+            Arc::clone(&self.rt),
+            self.tools.clone(),
+            self.recursion_limit,
+            self.context_config.clone(),
+            Some(RequestLogger::new()),
+        );
+
+        let response = session
             .chat_request_inner(inner_req, self.recursion_limit)
             .await;
 

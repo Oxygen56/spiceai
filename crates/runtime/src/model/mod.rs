@@ -28,6 +28,7 @@ mod metrics;
 mod model_context;
 pub mod params;
 pub(crate) mod provider_models;
+pub(crate) mod request_logger;
 mod responses;
 pub(crate) mod tool_use;
 mod tool_use_responses;

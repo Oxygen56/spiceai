@@ -163,24 +163,23 @@ impl GitTool {
             }
         }
 
-        // Validate cherry-pick has commits
+        // Validate cherry-pick has commits (unless --abort/--continue/--skip)
         if req.operation == "cherry-pick" {
-            match &req.commits {
-                None => {
-                    return Err(
-                        "Operation 'cherry-pick' requires a non-empty 'commits' list"
-                            .to_string()
-                            .into(),
-                    );
+            let has_control_flag = req.args.as_ref().map_or(false, |args| {
+                args.iter()
+                    .any(|a| a == "--abort" || a == "--continue" || a == "--skip")
+            });
+            if !has_control_flag {
+                match &req.commits {
+                    None | Some(_) if req.commits.as_ref().map_or(true, Vec::is_empty) => {
+                        return Err(
+                            "Operation 'cherry-pick' requires a non-empty 'commits' list (or use --abort/--continue/--skip in args)"
+                                .to_string()
+                                .into(),
+                        );
+                    }
+                    _ => {}
                 }
-                Some(commits) if commits.is_empty() => {
-                    return Err(
-                        "Operation 'cherry-pick' requires a non-empty 'commits' list"
-                            .to_string()
-                            .into(),
-                    );
-                }
-                _ => {}
             }
         }
 
@@ -329,8 +328,15 @@ impl GitTool {
             }
             "checkout" => {
                 cmd.arg("checkout");
-                if let Some(ref branch) = req.branch {
-                    cmd.arg(branch);
+                // When args contain -b, don't pass branch as a positional arg
+                // (it would be interpreted as a path, not a start point)
+                let has_branch_flag = req.args.as_ref().map_or(false, |args| {
+                    args.iter().any(|a| a == "-b" || a == "-B")
+                });
+                if !has_branch_flag {
+                    if let Some(ref branch) = req.branch {
+                        cmd.arg(branch);
+                    }
                 }
                 if let Some(ref args) = req.args {
                     cmd.args(args);

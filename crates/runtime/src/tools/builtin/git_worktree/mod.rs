@@ -107,17 +107,29 @@ impl GitWorktreeTool {
             .into());
         }
 
-        // Resolve the branch: check if it exists, otherwise create from HEAD.
+        // Resolve the branch: local first, then remote tracking, then create from HEAD.
         let reference = match repo.find_branch(branch, git2::BranchType::Local) {
             Ok(b) => b.into_reference(),
             Err(_) => {
-                // Branch doesn't exist; create it from HEAD.
-                let head_commit = repo
-                    .head()?
-                    .peel_to_commit()
-                    .map_err(|e| format!("Failed to resolve HEAD to commit: {e}"))?;
-                let new_branch = repo.branch(branch, &head_commit, false)?;
-                new_branch.into_reference()
+                // Try remote tracking branch (e.g., origin/release/1.1.x)
+                let remote_ref = format!("refs/remotes/origin/{branch}");
+                match repo.find_reference(&remote_ref) {
+                    Ok(remote_reference) => {
+                        let commit = remote_reference
+                            .peel_to_commit()
+                            .map_err(|e| format!("Failed to resolve remote ref to commit: {e}"))?;
+                        tracing::info!(branch = %branch, commit = %commit.id(), "Creating local branch from remote tracking branch");
+                        repo.branch(branch, &commit, false)?.into_reference()
+                    }
+                    Err(_) => {
+                        tracing::info!(branch = %branch, "Branch not found locally or on remote, creating from HEAD");
+                        let head_commit = repo
+                            .head()?
+                            .peel_to_commit()
+                            .map_err(|e| format!("Failed to resolve HEAD to commit: {e}"))?;
+                        repo.branch(branch, &head_commit, false)?.into_reference()
+                    }
+                }
             }
         };
 
@@ -203,9 +215,22 @@ impl GitWorktreeTool {
             }));
         }
 
+        // Get current branch name and HEAD commit
+        let branch_name = wt_repo
+            .head()
+            .ok()
+            .and_then(|h| h.shorthand().map(String::from));
+        let head_commit = wt_repo
+            .head()
+            .ok()
+            .and_then(|h| h.peel_to_commit().ok())
+            .map(|c| c.id().to_string());
+
         Ok(json!({
             "worktree_name": worktree_name,
             "path": wt_path.to_string_lossy(),
+            "branch": branch_name,
+            "head_commit": head_commit,
             "changed_files": changed_files,
             "total_changes": changed_files.len(),
         }))

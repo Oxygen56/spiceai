@@ -147,8 +147,8 @@ impl FileSourceConnectorFactory for GitFileSourceFactory {
         let repo = params
             .get("from")
             .ok_or("Missing 'from' parameter (expected github:owner/repo)")?
-            .strip_prefix("github:")
-            .ok_or("'from' must start with 'github:'")?;
+            .strip_prefix("github:/")
+            .ok_or("'from' must start with 'github:/'")?;
 
         let repo_url = format!("https://github.com/{repo}.git");
         let branch = params
