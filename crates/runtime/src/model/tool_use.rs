@@ -15,6 +15,7 @@ limitations under the License.
 */
 #![allow(clippy::missing_errors_doc)]
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use std::pin::Pin;
@@ -29,11 +30,12 @@ use async_openai::error::OpenAIError;
 use async_openai::types::chat::{
     ChatChoiceStream, ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageArgs,
-    ChatCompletionRequestMessage, ChatCompletionRequestToolMessageArgs,
-    ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionToolChoiceOption,
-    ChatCompletionTools, CompletionTokensDetails, CompletionUsage, CreateChatCompletionRequest,
-    CreateChatCompletionResponse, CreateChatCompletionStreamResponse, FinishReason, FunctionCall,
-    FunctionObject, PromptTokensDetails, Role, ToolChoiceOptions,
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+    ChatCompletionRequestToolMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
+    ChatCompletionToolChoiceOption, ChatCompletionTools, CompletionTokensDetails, CompletionUsage,
+    CreateChatCompletionRequest, CreateChatCompletionResponse,
+    CreateChatCompletionStreamResponse, FinishReason, FunctionCall, FunctionObject,
+    PromptTokensDetails, Role, ToolChoiceOptions,
 };
 
 use async_trait::async_trait;
@@ -329,6 +331,7 @@ impl ToolUsingChat {
         &self,
         req: CreateChatCompletionRequest,
         recursion_limit: Option<usize>,
+        recent_tool_fingerprints: Vec<u64>,
     ) -> Result<CreateChatCompletionResponse, OpenAIError> {
         Box::pin(async move {
             // Don't use spice runtime tools if users has explicitly chosen to not use any tools.
@@ -385,12 +388,28 @@ impl ToolUsingChat {
                 })
                 .collect();
 
+            // Compute fingerprint for loop detection.
+            let fingerprint = chat_tool_calls_fingerprint(&tool_calls);
+            let mut fingerprints = recent_tool_fingerprints;
+            fingerprints.push(fingerprint);
+
             match self
                 .process_tool_calls_and_run_spice_tools(req.messages, tool_calls)
                 .await?
             {
                 // New messages means we have run spice tools locally, ready to recall model.
-                Some(messages) => {
+                Some(mut messages) => {
+                    // Detect repeated identical tool calls (3 consecutive identical fingerprints).
+                    if is_tool_loop_detected(&fingerprints) {
+                        tracing::warn!("Tool-use loop detected: identical tool calls repeated 3 times");
+                        messages.push(
+                            ChatCompletionRequestSystemMessageArgs::default()
+                                .content(LOOP_DETECTION_MESSAGE)
+                                .build()?
+                                .into(),
+                        );
+                    }
+
                     let mut resp = match self
                         .chat_request_inner(
                             create_new_recursive_req(
@@ -400,6 +419,7 @@ impl ToolUsingChat {
                                 &self.context_config,
                             ),
                             recursion_limit.map(|r| r - 1),
+                            fingerprints,
                         )
                         .await
                     {
@@ -552,7 +572,7 @@ impl Chat for ToolUsingChat {
         );
 
         let response = session
-            .chat_request_inner(inner_req, self.recursion_limit)
+            .chat_request_inner(inner_req, self.recursion_limit, vec![])
             .await;
 
         // track ai_inferences_with_spice_count metric
@@ -952,6 +972,28 @@ fn make_a_stream(
             .instrument(span),
     );
     Box::pin(CustomStream { receiver }) as ChatCompletionResponseStream
+}
+
+const LOOP_DETECTION_MESSAGE: &str = "You have called the same tool(s) with identical arguments multiple times and received the same results. The state has not changed. Please take a different action, proceed to the next step of your task, or report what is blocking you.";
+
+/// Compute a fingerprint (hash) of the tool calls for loop detection.
+fn chat_tool_calls_fingerprint(calls: &[ChatCompletionMessageToolCall]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut keys: Vec<(&str, &str)> = calls
+        .iter()
+        .map(|c| (c.function.name.as_str(), c.function.arguments.as_str()))
+        .collect();
+    keys.sort();
+    keys.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Check if the last 3 fingerprints are identical (indicating a tool-use loop).
+fn is_tool_loop_detected(fingerprints: &[u64]) -> bool {
+    let len = fingerprints.len();
+    len >= 3
+        && fingerprints[len - 1] == fingerprints[len - 2]
+        && fingerprints[len - 2] == fingerprints[len - 3]
 }
 
 // OpenAI tools must satisfy '^[a-zA-Z0-9_-]+$'. Commonly external tools may have '/' in their name.

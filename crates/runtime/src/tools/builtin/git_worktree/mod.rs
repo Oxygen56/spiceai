@@ -226,13 +226,30 @@ impl GitWorktreeTool {
             .and_then(|h| h.peel_to_commit().ok())
             .map(|c| c.id().to_string());
 
+        let total_changes = changed_files.len();
+
+        // Determine if all changes are staged (in index) vs some unstaged.
+        let has_unstaged = statuses.iter().any(|entry| {
+            let s = entry.status();
+            s.is_wt_new() || s.is_wt_modified() || s.is_wt_deleted() || s.is_wt_renamed()
+        });
+
+        let suggestion = if total_changes == 0 {
+            "No uncommitted changes. Worktree is clean and ready for next operation."
+        } else if has_unstaged {
+            "There are unstaged changes. Use git add to stage them before committing."
+        } else {
+            "Changes are staged. Ready to commit."
+        };
+
         Ok(json!({
             "worktree_name": worktree_name,
             "path": wt_path.to_string_lossy(),
             "branch": branch_name,
             "head_commit": head_commit,
             "changed_files": changed_files,
-            "total_changes": changed_files.len(),
+            "total_changes": total_changes,
+            "suggestion": suggestion,
         }))
     }
 

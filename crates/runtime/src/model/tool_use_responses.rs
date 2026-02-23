@@ -27,6 +27,7 @@ use async_openai::{
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use itertools::Itertools;
+use std::hash::{Hash, Hasher};
 use llms::responses::Error as ResponsesError;
 use llms::responses::Responses;
 use llms::{chat::Error as LlmError, progress::Progress};
@@ -314,6 +315,7 @@ impl ToolUsingResponses {
         &self,
         req: CreateResponse,
         recursion_limit: Option<usize>,
+        recent_tool_fingerprints: Vec<u64>,
     ) -> Result<Response, OpenAIError> {
         Box::pin(async move {
             // Don't use spice runtime tools if users has explicitly chosen to not use any tools.
@@ -371,12 +373,27 @@ impl ToolUsingResponses {
                 })
                 .collect_vec();
 
+            // Compute fingerprint for loop detection.
+            let fingerprint = responses_tool_calls_fingerprint(&tools_used);
+            let mut fingerprints = recent_tool_fingerprints;
+            fingerprints.push(fingerprint);
+
             match self
                 .process_tool_calls_and_run_spice_tools(to_input_item(req.input), tools_used)
                 .await?
             {
                 // New messages means we have run spice tools locally, ready to recall model.
-                Some(messages) => {
+                Some(mut messages) => {
+                    // Detect repeated identical tool calls (3 consecutive identical fingerprints).
+                    if is_tool_loop_detected(&fingerprints) {
+                        tracing::warn!("Tool-use loop detected: identical tool calls repeated 3 times");
+                        messages.push(InputItem::EasyMessage(EasyInputMessage {
+                            content: EasyInputContent::Text(LOOP_DETECTION_MESSAGE.to_string()),
+                            role: Role::Developer,
+                            r#type: MessageType::Message,
+                        }));
+                    }
+
                     let mut resp = match self
                         .responses_request_inner(
                             create_new_recursive_req(
@@ -386,6 +403,7 @@ impl ToolUsingResponses {
                                 &self.context_config,
                             ),
                             recursion_limit.map(|r| r - 1),
+                            fingerprints,
                         )
                         .await
                     {
@@ -520,7 +538,7 @@ impl Responses for ToolUsingResponses {
             Some(RequestLogger::new()),
         );
         session
-            .responses_request_inner(inner_req, self.recursion_limit)
+            .responses_request_inner(inner_req, self.recursion_limit, vec![])
             .await
     }
 }
@@ -772,6 +790,28 @@ fn make_responses_stream(
     );
 
     Box::pin(CustomResponseStream { receiver }) as ResponseStream
+}
+
+const LOOP_DETECTION_MESSAGE: &str = "You have called the same tool(s) with identical arguments multiple times and received the same results. The state has not changed. Please take a different action, proceed to the next step of your task, or report what is blocking you.";
+
+/// Compute a fingerprint (hash) of the tool calls for loop detection.
+fn responses_tool_calls_fingerprint(calls: &[FunctionToolCall]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut keys: Vec<(&str, &str)> = calls
+        .iter()
+        .map(|c| (c.name.as_str(), c.arguments.as_str()))
+        .collect();
+    keys.sort();
+    keys.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Check if the last 3 fingerprints are identical (indicating a tool-use loop).
+fn is_tool_loop_detected(fingerprints: &[u64]) -> bool {
+    let len = fingerprints.len();
+    len >= 3
+        && fingerprints[len - 1] == fingerprints[len - 2]
+        && fingerprints[len - 2] == fingerprints[len - 3]
 }
 
 fn get_tool_name(tool: &ToolDefinition) -> &str {
