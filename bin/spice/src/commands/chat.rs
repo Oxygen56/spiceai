@@ -26,6 +26,7 @@ use futures::StreamExt;
 use repl::util::{Spinner, create_editor_with_history, save_history};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
+use std::collections::HashSet;
 use std::io::{self, Read, Write};
 use std::time::Instant;
 
@@ -120,6 +121,20 @@ struct SseError {
 #[derive(Deserialize)]
 struct SseErrorBody {
     message: String,
+}
+
+/// Response from `GET /v1/agents/approvals`.
+#[derive(Deserialize)]
+struct ApprovalsResponse {
+    approvals: Vec<PendingApprovalInfo>,
+}
+
+/// A pending approval from the runtime API.
+#[derive(Deserialize)]
+struct PendingApprovalInfo {
+    id: String,
+    message: String,
+    context: Option<String>,
 }
 
 /// Token usage statistics.
@@ -379,6 +394,51 @@ async fn run_repl(ctx: &RuntimeContext, config: &ChatConfig<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Fetch pending approvals from the runtime API.
+/// Returns an empty vec on any error so approval-check failures never break streaming.
+async fn fetch_pending_approvals(ctx: &RuntimeContext) -> Vec<PendingApprovalInfo> {
+    let Ok(response) = ctx.get("/v1/agents/approvals").await else {
+        return Vec::new();
+    };
+    response
+        .json::<ApprovalsResponse>()
+        .await
+        .map(|r| r.approvals)
+        .unwrap_or_default()
+}
+
+/// Resolve a pending approval by posting the user's decision.
+async fn resolve_approval(ctx: &RuntimeContext, approval_id: &str, approved: bool) {
+    let body = serde_json::json!({ "approved": approved });
+    if let Err(e) = ctx
+        .post_json(&format!("/v1/agents/approvals/{approval_id}"), &body)
+        .await
+    {
+        eprintln!("\x1b[33mWarning:\x1b[0m Failed to resolve approval: {e}");
+    }
+}
+
+/// Display an approval prompt and read the user's response.
+/// Returns `true` for approve, `false` for reject (default).
+fn prompt_user_for_approval(approval: &PendingApprovalInfo) -> bool {
+    eprintln!();
+    eprintln!("\x1b[33m--- Approval Required ---\x1b[0m");
+    eprintln!("\x1b[1m{}\x1b[0m", approval.message);
+    if let Some(ref context) = approval.context {
+        eprintln!("{context}");
+    }
+    eprint!("\x1b[33mApprove? [y/N]: \x1b[0m");
+    let _ = io::stderr().flush();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_ok() {
+        let trimmed = input.trim().to_lowercase();
+        trimmed == "y" || trimmed == "yes"
+    } else {
+        false
+    }
+}
+
 /// Send a chat request with streaming response.
 async fn send_chat_streaming(
     ctx: &RuntimeContext,
@@ -455,7 +515,41 @@ async fn send_chat_streaming(
     let mut first_token_time: Option<std::time::Duration> = None;
     let mut usage: Option<Usage> = None;
 
-    while let Some(chunk_result) = stream.next().await {
+    // Approval polling state — only active in interactive mode before first content token.
+    let mut handled_approvals: HashSet<String> = HashSet::new();
+    let mut approval_check_interval =
+        tokio::time::interval(std::time::Duration::from_secs(3));
+    approval_check_interval.tick().await; // consume the immediate first tick
+
+    loop {
+        let chunk_result = tokio::select! {
+            chunk = stream.next() => {
+                match chunk {
+                    Some(result) => result,
+                    None => break, // stream ended
+                }
+            }
+            _ = approval_check_interval.tick(), if interactive && first_token_time.is_none() => {
+                // Poll for pending approvals while waiting for first content token.
+                for approval in fetch_pending_approvals(ctx).await {
+                    if handled_approvals.contains(&approval.id) {
+                        continue;
+                    }
+                    if let Some(s) = spinner.take() {
+                        s.stop().await;
+                    }
+                    let approved = prompt_user_for_approval(&approval);
+                    handled_approvals.insert(approval.id.clone());
+                    resolve_approval(ctx, &approval.id, approved).await;
+                    let status = if approved { "Approved" } else { "Rejected" };
+                    eprintln!("\x1b[32m{status}\x1b[0m");
+                    // Restart spinner while still waiting for content.
+                    spinner = Some(Spinner::start());
+                }
+                continue;
+            }
+        };
+
         let chunk = match chunk_result {
             Ok(chunk) => chunk,
             Err(e) => {
