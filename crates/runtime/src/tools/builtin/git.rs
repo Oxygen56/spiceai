@@ -29,7 +29,7 @@ use crate::tools::utils::parameters;
 
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct GitToolParams {
-    /// The git operation: "status", "log", "diff", "add", "branch", "checkout", "cherry-pick", "commit", "push".
+    /// The git operation: "status", "log", "diff", "add", "branch", "checkout", "cherry-pick", "commit", "push", "fetch".
     operation: String,
     /// Working directory. Must be an absolute path within repo_path or a tracked worktree.
     /// Prefer using worktree_name instead for worktree operations.
@@ -52,7 +52,7 @@ pub struct GitToolParams {
 }
 
 const READ_OPERATIONS: &[&str] = &["status", "log", "diff"];
-const WRITE_OPERATIONS: &[&str] = &["add", "branch", "checkout", "cherry-pick", "commit", "push"];
+const WRITE_OPERATIONS: &[&str] = &["add", "branch", "checkout", "cherry-pick", "commit", "push", "fetch"];
 
 #[derive(Debug)]
 pub struct GitTool {
@@ -270,6 +270,8 @@ impl GitTool {
 
         // Disable interactive credential prompts — fail fast instead of hanging
         cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd.env("GIT_EDITOR", "true");       // prevent editor from opening
+        cmd.env("GIT_PAGER", "cat");         // prevent pager from opening (e.g., git log)
 
         // Inject HTTPS credentials via inline credential helper
         if let Some(ref token) = self.github_token {
@@ -364,6 +366,31 @@ impl GitTool {
             }
             "push" => {
                 cmd.arg("push");
+                let remote = req
+                    .remote
+                    .as_deref()
+                    .unwrap_or("origin");
+                cmd.arg(remote);
+                if let Some(ref branch) = req.branch {
+                    cmd.arg(branch);
+                } else {
+                    // Auto-detect current branch to avoid origin/HEAD resolution
+                    // failures (e.g. "refs/remotes/origin/HEAD cannot be resolved
+                    // to branch" in worktrees with broken symrefs).
+                    if let Ok(repo) = git2::Repository::open(work_dir) {
+                        if let Ok(head) = repo.head() {
+                            if let Some(branch_name) = head.shorthand() {
+                                cmd.arg(branch_name);
+                            }
+                        }
+                    }
+                }
+                if let Some(ref args) = req.args {
+                    cmd.args(args);
+                }
+            }
+            "fetch" => {
+                cmd.arg("fetch");
                 let remote = req
                     .remote
                     .as_deref()

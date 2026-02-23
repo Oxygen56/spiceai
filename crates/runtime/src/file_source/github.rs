@@ -59,6 +59,16 @@ impl GitFileSource {
             .fetch_options(fetch_opts)
             .clone(&self.repo_url, target_path)?;
 
+        // Ensure origin/HEAD points to the cloned branch so that worktrees
+        // can resolve it when pushing (avoids "refs/remotes/origin/HEAD cannot
+        // be resolved to branch" errors).
+        let _ = repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            &format!("refs/remotes/origin/{}", self.branch),
+            true,
+            "set origin/HEAD to cloned branch",
+        );
+
         let head = repo.head()?;
         let tree = head.peel_to_tree()?;
         Ok(tree.len())
