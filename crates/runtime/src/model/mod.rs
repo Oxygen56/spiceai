@@ -50,7 +50,8 @@ pub use eval::{
     scorer::{EvalScorerRegistry, Scorer, builtin_scorer},
 };
 pub use model_context::{
-    ModelContextExtension, ModelContextLayer, add_tools_used, track_ai_inferences_with_spice_count,
+    ModelContextExtension, ModelContextLayer, SingleShotExtension, add_tools_used,
+    track_ai_inferences_with_spice_count,
 };
 pub use responses::{LLMResponsesModelStore, try_to_responses_model};
 pub use tool_use::ToolUsingChat;

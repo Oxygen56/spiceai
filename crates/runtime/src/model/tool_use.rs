@@ -48,7 +48,7 @@ use tools::SpiceModelTool;
 use tracing::{Instrument, Span};
 
 use crate::Runtime;
-use crate::model::ModelContextExtension;
+use crate::model::{ModelContextExtension, SingleShotExtension};
 use crate::model::context::{ContextConfig, manage_chat_context, truncate_tool_output};
 use crate::model::request_logger::RequestLogger;
 use crate::tools::builtin::plan_mode::{
@@ -718,6 +718,14 @@ impl Chat for ToolUsingChat {
         if context.extension::<ModelContextExtension>().is_none() {
             context.insert_extension(ModelContextExtension::new());
         }
+
+        // Single-shot mode: skip tool execution, return raw model response.
+        let recursion_limit = if context.extension::<SingleShotExtension>().is_some() {
+            Some(0)
+        } else {
+            self.recursion_limit
+        };
+
         let inner_req = self.prepare_req(req).await?;
 
         // Create a session-scoped instance with a fresh request logger.
@@ -725,7 +733,7 @@ impl Chat for ToolUsingChat {
             Arc::clone(&self.inner_chat),
             Arc::clone(&self.rt),
             self.tools.clone(),
-            self.recursion_limit,
+            recursion_limit,
             self.context_config.clone(),
             Some(RequestLogger::new()),
             self.plan_mode,
@@ -745,6 +753,13 @@ impl Chat for ToolUsingChat {
             context.insert_extension(ModelContextExtension::new());
         }
 
+        // Single-shot mode: skip tool execution, return raw model response.
+        let recursion_limit = if context.extension::<SingleShotExtension>().is_some() {
+            Some(0)
+        } else {
+            self.recursion_limit
+        };
+
         let inner_req = self.prepare_req(req).await?;
 
         // Create a session-scoped instance with a fresh request logger.
@@ -752,14 +767,14 @@ impl Chat for ToolUsingChat {
             Arc::clone(&self.inner_chat),
             Arc::clone(&self.rt),
             self.tools.clone(),
-            self.recursion_limit,
+            recursion_limit,
             self.context_config.clone(),
             Some(RequestLogger::new()),
             self.plan_mode,
         );
 
         let response = session
-            .chat_request_inner(inner_req, self.recursion_limit, vec![], self.plan_mode)
+            .chat_request_inner(inner_req, recursion_limit, vec![], self.plan_mode)
             .await;
 
         // track ai_inferences_with_spice_count metric

@@ -21,7 +21,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::model::LLMChatCompletionsModelStore;
+use crate::model::{LLMChatCompletionsModelStore, SingleShotExtension};
 #[cfg(feature = "openapi")]
 use async_openai::types::chat::CreateChatCompletionResponse;
 use async_openai::{
@@ -124,6 +124,10 @@ pub(crate) async fn post(
     Json(req): Json<CreateChatCompletionRequest>,
 ) -> Response {
     let context = RequestContext::current(AsyncMarker::new().await);
+
+    if headers.get("x-spice-single-shot").is_some() {
+        context.insert_extension(SingleShotExtension);
+    }
 
     let span = tracing::span!(
         target: "task_history",

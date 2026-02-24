@@ -136,3 +136,15 @@ impl Extension for ModelContextExtension {
         self
     }
 }
+
+/// Marker extension: when present, `ToolUsingChat` skips tool execution
+/// and returns the model's raw response (including tool_calls).
+#[derive(Clone)]
+pub struct SingleShotExtension;
+
+#[async_trait::async_trait]
+impl Extension for SingleShotExtension {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}

@@ -109,6 +109,24 @@ struct ChunkChoice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<DeltaToolCall>>,
+}
+
+/// A tool call chunk in a streaming delta.
+#[derive(Deserialize)]
+struct DeltaToolCall {
+    #[serde(default)]
+    function: Option<DeltaFunction>,
+}
+
+/// Function details in a tool call chunk.
+#[derive(Deserialize)]
+struct DeltaFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 /// An SSE error event from the server.
@@ -662,6 +680,7 @@ async fn execute_replay(ctx: &RuntimeContext, replay_path: &str, args: &ChatArgs
         .post(&url)
         .header("Content-Type", "application/json")
         .header("Accept", "text/event-stream")
+        .header("X-Spice-Single-Shot", "true")
         .json(&body);
 
     for (key, value) in ctx.get_headers() {
@@ -702,6 +721,19 @@ async fn execute_replay(ctx: &RuntimeContext, replay_path: &str, args: &ChatArgs
                     for choice in &chat_chunk.choices {
                         if let Some(content) = &choice.delta.content {
                             print!("{content}");
+                            let _ = io::stdout().flush();
+                        }
+                        if let Some(tool_calls) = &choice.delta.tool_calls {
+                            for tc in tool_calls {
+                                if let Some(ref func) = tc.function {
+                                    if let Some(ref name) = func.name {
+                                        print!("\n[tool_call: {name}");
+                                    }
+                                    if let Some(ref args) = func.arguments {
+                                        print!("{args}");
+                                    }
+                                }
+                            }
                             let _ = io::stdout().flush();
                         }
                     }

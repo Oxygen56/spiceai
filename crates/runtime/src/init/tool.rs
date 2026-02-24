@@ -25,7 +25,7 @@ use crate::{
 use futures::future::join_all;
 use opentelemetry::KeyValue;
 use runtime_secrets::get_params_with_secrets;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use snafu::ResultExt;
 use spicepod::component::tool::Tool;
 use spicepod::component::write_tool::WriteTool;
@@ -68,11 +68,26 @@ impl Runtime {
                 .with_worktree_tracker(self.worktree_tracker());
 
             for file_source in &app.file_sources {
+                // Resolve secrets in file_source params (e.g. ${secrets:GITHUB_TOKEN})
+                // before deriving tool construction params.
+                let resolved_fs_params: HashMap<String, String> = {
+                    let secret_params =
+                        get_params_with_secrets(self.secrets(), &file_source.params).await;
+                    secret_params
+                        .into_iter()
+                        .map(|(k, v)| (k, v.expose_secret().to_string()))
+                        .collect()
+                };
+                let resolved_file_source = spicepod::component::file_source::FileSource {
+                    params: resolved_fs_params,
+                    ..file_source.clone()
+                };
+
                 for tool_shorthand in &file_source.tools {
                     let (tool_id, is_write) =
                         file_source_tools::parse_tool_shorthand(tool_shorthand);
                     let derived_params =
-                        file_source_tools::derive_tool_params(file_source, tool_id);
+                        file_source_tools::derive_tool_params(&resolved_file_source, tool_id);
 
                     match catalog.construct_builtin(tool_id, None, None, &derived_params) {
                         Ok(tool) => {
