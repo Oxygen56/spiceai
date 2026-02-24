@@ -29,7 +29,7 @@ use crate::tools::utils::parameters;
 
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct GitToolParams {
-    /// The git operation: "status", "log", "diff", "add", "branch", "checkout", "cherry-pick", "commit", "push", "fetch".
+    /// The git operation: "status", "log", "diff", "show", "remote", "tag", "ls-tree", "ls-remote", "add", "branch", "checkout", "cherry-pick", "commit", "push", "fetch".
     operation: String,
     /// Working directory. Must be an absolute path within repo_path or a tracked worktree.
     /// Prefer using worktree_name instead for worktree operations.
@@ -51,8 +51,12 @@ pub struct GitToolParams {
     worktree_name: Option<String>,
 }
 
-const READ_OPERATIONS: &[&str] = &["status", "log", "diff"];
-const WRITE_OPERATIONS: &[&str] = &["add", "branch", "checkout", "cherry-pick", "commit", "push", "fetch"];
+const READ_OPERATIONS: &[&str] = &[
+    "status", "log", "diff", "show", "remote", "tag", "ls-tree", "ls-remote",
+];
+const WRITE_OPERATIONS: &[&str] = &[
+    "add", "branch", "checkout", "cherry-pick", "commit", "push", "fetch",
+];
 
 #[derive(Debug)]
 pub struct GitTool {
@@ -399,6 +403,48 @@ impl GitTool {
                 if let Some(ref branch) = req.branch {
                     cmd.arg(branch);
                 }
+                if let Some(ref args) = req.args {
+                    cmd.args(args);
+                }
+            }
+            "show" => {
+                cmd.arg("show");
+                if let Some(ref commits) = req.commits {
+                    cmd.args(commits);
+                }
+                if let Some(ref args) = req.args {
+                    cmd.args(args);
+                }
+            }
+            "remote" => {
+                cmd.arg("remote");
+                if let Some(ref args) = req.args {
+                    cmd.args(args);
+                } else {
+                    cmd.arg("-v");
+                }
+            }
+            "tag" => {
+                cmd.arg("tag");
+                if let Some(ref args) = req.args {
+                    cmd.args(args);
+                } else {
+                    cmd.arg("-l");
+                }
+            }
+            "ls-tree" => {
+                cmd.arg("ls-tree");
+                if let Some(ref args) = req.args {
+                    cmd.args(args);
+                }
+            }
+            "ls-remote" => {
+                cmd.arg("ls-remote");
+                let remote = req
+                    .remote
+                    .as_deref()
+                    .unwrap_or("origin");
+                cmd.arg(remote);
                 if let Some(ref args) = req.args {
                     cmd.args(args);
                 }

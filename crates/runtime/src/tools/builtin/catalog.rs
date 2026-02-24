@@ -54,6 +54,7 @@ use super::{
     list_files::ListFilesTool,
     ms_teams::TeamsTool,
     read_file::ReadFileTool,
+    write_file::WriteFileTool,
     sample::{SampleTableMethod, tool::SampleDataTool},
     search::SearchTool,
     slack::SlackTool,
@@ -250,6 +251,7 @@ impl BuiltinToolCatalog {
             "claude_code",
             "debug",
             "fail",
+            "write_file",
             "github",
             "http_tool",
             "approval",
@@ -287,6 +289,7 @@ impl BuiltinToolCatalog {
             ("list_file_sources", None) => "List available file sources and their local paths. This includes github repositories",
             ("grep", None) => "Search for a pattern in files within configured directories",
             ("read_file", None) => "Read the contents of a file at the given path",
+            ("write_file", None) => "Write content to a file at the given path",
             ("list_files", None) => "List files and directories at the given path",
             ("kubectl", None) => "Execute kubectl operations against a Kubernetes cluster",
             ("slack", None) => "Read or post messages in Slack channels",
@@ -398,6 +401,15 @@ impl BuiltinToolCatalog {
             "read_file" => {
                 let base_paths = parse_and_expand_base_paths(params);
                 Ok(Arc::new(ReadFileTool::new(
+                    Some(name),
+                    Some(description),
+                    base_paths,
+                    Some(self.worktree_tracker.clone()),
+                )))
+            }
+            "write_file" => {
+                let base_paths = parse_and_expand_base_paths(params);
+                Ok(Arc::new(WriteFileTool::new(
                     Some(name),
                     Some(description),
                     base_paths,
@@ -539,6 +551,12 @@ impl BuiltinToolCatalog {
                             "status".to_string(),
                             "log".to_string(),
                             "diff".to_string(),
+                            "show".to_string(),
+                            "remote".to_string(),
+                            "tag".to_string(),
+                            "ls-tree".to_string(),
+                            "ls-remote".to_string(),
+                            "fetch".to_string(),
                             "add".to_string(),
                             "branch".to_string(),
                             "checkout".to_string(),

@@ -32,8 +32,6 @@ use crate::tools::builtin::fail::FailTool;
 use crate::tools::builtin::plan_mode::{
     EnterPlanModeTool, ExitPlanModeTool, ENTER_PLAN_MODE_TOOL_NAME, EXIT_PLAN_MODE_TOOL_NAME,
 };
-use tools::ToolCapability;
-
 use crate::memory::layers::{
     knowledge_base::KnowledgeBaseLayer, session::SessionLayer,
     session_summary::SessionSummaryLayer, weekly_rollup::WeeklyRollupLayer,
@@ -200,7 +198,15 @@ impl RuntimeModelCaller {
     ) -> Result<(String, HashSet<String>), Box<dyn std::error::Error + Send + Sync>> {
         let mut current_messages = messages;
         let mut tools_called = HashSet::new();
+        // Plan mode state is tracked for logging and plan mode tool toggling.
+        // Tool availability is NOT filtered by plan mode — it's a behavioral
+        // constraint via system prompt, not a technical sandbox.
         let mut plan_mode = initial_plan_mode;
+        tracing::info!(
+            target: "task_history",
+            plan_mode = plan_mode,
+            "Starting tool loop"
+        );
 
         for iteration in 0..max_iterations {
             tracing::debug!(
@@ -218,16 +224,9 @@ impl RuntimeModelCaller {
             );
 
             let iter_result: Result<IterationOutcome, Box<dyn std::error::Error + Send + Sync>> = async {
-                // Filter tools based on plan mode
-                let active_tools: Vec<Arc<dyn SpiceModelTool>> = if plan_mode {
-                    all_step_tools
-                        .iter()
-                        .filter(|t| t.capability() == ToolCapability::ReadOnly)
-                        .cloned()
-                        .collect()
-                } else {
-                    all_step_tools.to_vec()
-                };
+                // All tools are always available — plan mode is a behavioral constraint
+                // via the system prompt, not a technical tool filter.
+                let active_tools = all_step_tools.to_vec();
                 let active_schemas = Self::tools_to_schemas(&active_tools);
 
                 let mut req_builder = CreateChatCompletionRequestArgs::default();
@@ -309,7 +308,7 @@ impl RuntimeModelCaller {
                             new_plan_mode = Some(true);
                             let tool_message: ChatCompletionRequestMessage =
                                 ChatCompletionRequestToolMessageArgs::default()
-                                    .content("Plan mode activated. Only read-only tools are now available. Use read-only tools to research and gather information, then call exit_plan_mode with your plan.")
+                                    .content("Plan mode activated. You have access to all tools but MUST only use them for read-only purposes. Research and gather information, then call exit_plan_mode with your plan.")
                                     .tool_call_id(tool_call.id.clone())
                                     .build()?
                                     .into();
@@ -318,15 +317,66 @@ impl RuntimeModelCaller {
                         }
                         if tool.name() == EXIT_PLAN_MODE_TOOL_NAME {
                             let _ = tool.call(&tool_call.function.arguments).await;
-                            new_plan_mode = Some(false);
-                            if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments) {
-                                if let Some(plan) = args.get("plan").and_then(|p| p.as_str()) {
-                                    println!("\n📋 Agent Plan:\n{plan}\n");
-                                }
+                            let plan_text = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
+                                .ok()
+                                .and_then(|v| v.get("plan").and_then(|p| p.as_str()).map(String::from))
+                                .unwrap_or_default();
+
+                            if !plan_text.is_empty() {
+                                println!("\n📋 Agent Plan:\n{plan_text}\n");
                             }
+
+                            // Auto-call approval tool if one exists among step tools
+                            let approval_tool = all_step_tools.iter().find(|t| {
+                                let n = t.name();
+                                n == "approval" || n == "approval_slack" || n == "approval_ms_teams"
+                            });
+
+                            let tool_response = if let Some(approval) = approval_tool {
+                                let approval_arg = serde_json::json!({
+                                    "message": format!("Agent plan requires approval:\n\n{plan_text}"),
+                                    "context": plan_text,
+                                }).to_string();
+
+                                tracing::info!(
+                                    target: "task_history",
+                                    "Plan submitted for approval, waiting..."
+                                );
+
+                                match approval.call(&approval_arg).await {
+                                    Ok(result) => {
+                                        let approved = result.get("approved")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false);
+                                        let comment = result.get("comment")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+
+                                        if approved {
+                                            new_plan_mode = Some(false);
+                                            let suffix = if comment.is_empty() { String::new() } else { format!(": {comment}") };
+                                            format!("Plan approved{suffix}. You may now proceed with execution.")
+                                        } else {
+                                            // Rejected — stay in plan mode
+                                            new_plan_mode = Some(true);
+                                            format!("Plan rejected: {comment}. Revise your plan and call exit_plan_mode again.")
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "Approval tool failed, proceeding without approval");
+                                        new_plan_mode = Some(false);
+                                        format!("Approval tool error ({e}). Proceeding with plan execution.")
+                                    }
+                                }
+                            } else {
+                                // No approval tool — proceed immediately
+                                new_plan_mode = Some(false);
+                                "Plan mode deactivated. All tools are now available. You may proceed with your plan.".to_string()
+                            };
+
                             let tool_message: ChatCompletionRequestMessage =
                                 ChatCompletionRequestToolMessageArgs::default()
-                                    .content("Plan mode deactivated. All tools are now available. You may proceed with your plan.")
+                                    .content(tool_response)
                                     .tool_call_id(tool_call.id.clone())
                                     .build()?
                                     .into();
@@ -378,6 +428,11 @@ impl RuntimeModelCaller {
                 IterationOutcome::Continue(iter_tools, plan_mode_change) => {
                     if let Some(new_mode) = plan_mode_change {
                         plan_mode = new_mode;
+                        tracing::info!(
+                            target: "task_history",
+                            plan_mode = plan_mode,
+                            "Plan mode state changed"
+                        );
                     }
                     let count = iter_tools.len();
                     tools_called.extend(iter_tools);

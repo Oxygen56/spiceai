@@ -65,13 +65,17 @@ pub fn resolve_workflow(
     let system_prompt = if plan_mode {
         format!(
             "{}\n\n## Planning Mode\n\n\
-             You have access to planning mode tools. When in plan mode, only read-only tools \
-             (queries, searches, file reads) are available. Write tools are unlocked after you \
-             exit plan mode.\n\n\
-             - `enter_plan_mode(reason)` \u{2014} Switch to read-only mode to research and plan.\n\
-             - `exit_plan_mode(plan)` \u{2014} Present your plan and unlock all tools.\n\n\
-             You start in plan mode. Gather information using read-only tools, then call \
-             exit_plan_mode with your plan before executing write operations.",
+             You start in planning mode. In this mode:\n\
+             - You have access to ALL tools, but you MUST only use them for \
+             read-only purposes (queries, searches, file reads, git log, git status, etc.)\n\
+             - Do NOT make any changes, write files, create commits, or perform \
+             any operations with side effects\n\
+             - Research and gather information, then call `exit_plan_mode` with \
+             your plan describing what actions you will take\n\
+             - After your plan is approved, you may proceed with write operations\n\n\
+             Tools available:\n\
+             - `enter_plan_mode(reason)` \u{2014} Re-enter planning mode to research further\n\
+             - `exit_plan_mode(plan)` \u{2014} Submit your plan for approval and unlock all tools",
             agent.prompt
         )
     } else {

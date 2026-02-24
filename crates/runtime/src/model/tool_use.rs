@@ -51,6 +51,9 @@ use crate::Runtime;
 use crate::model::ModelContextExtension;
 use crate::model::context::{ContextConfig, manage_chat_context, truncate_tool_output};
 use crate::model::request_logger::RequestLogger;
+use crate::tools::builtin::plan_mode::{
+    EnterPlanModeTool, ExitPlanModeTool, ENTER_PLAN_MODE_TOOL_NAME, EXIT_PLAN_MODE_TOOL_NAME,
+};
 use llms::progress::Progress;
 use runtime_request_context::{AsyncMarker, RequestContext};
 
@@ -61,6 +64,11 @@ pub struct ToolUsingChat {
     recursion_limit: Option<usize>,
     context_config: ContextConfig,
     request_logger: Option<RequestLogger>,
+    /// Whether the tool-calling loop starts in plan mode.
+    /// In plan mode, all tools are available but the model is instructed
+    /// via the system prompt to only use them for read-only purposes.
+    /// Plan mode is toggled by `enter_plan_mode` / `exit_plan_mode` tools.
+    plan_mode: bool,
 }
 
 impl ToolUsingChat {
@@ -72,6 +80,9 @@ impl ToolUsingChat {
         recursion_limit: Option<usize>,
         context_config: ContextConfig,
     ) -> Self {
+        let mut tools = tools;
+        tools.push(Arc::new(EnterPlanModeTool::new(None, None)));
+        tools.push(Arc::new(ExitPlanModeTool::new(None, None)));
         Self {
             inner_chat,
             rt,
@@ -79,7 +90,20 @@ impl ToolUsingChat {
             recursion_limit,
             context_config,
             request_logger: None,
+            plan_mode: false,
         }
+    }
+
+    /// Enable plan mode for this `ToolUsingChat` instance.
+    ///
+    /// In plan mode, all tools remain available but the model is instructed
+    /// to only use them for read-only operations. When `exit_plan_mode` is
+    /// called, the approval tool (if configured) is auto-invoked. If approved
+    /// (or no approval tool), plan mode is deactivated and the model proceeds.
+    #[must_use]
+    pub fn with_plan_mode(mut self, plan_mode: bool) -> Self {
+        self.plan_mode = plan_mode;
+        self
     }
 
     fn new_with_logger(
@@ -89,6 +113,7 @@ impl ToolUsingChat {
         recursion_limit: Option<usize>,
         context_config: ContextConfig,
         request_logger: Option<RequestLogger>,
+        plan_mode: bool,
     ) -> Self {
         Self {
             inner_chat,
@@ -97,6 +122,7 @@ impl ToolUsingChat {
             recursion_limit,
             context_config,
             request_logger,
+            plan_mode,
         }
     }
 
@@ -332,6 +358,7 @@ impl ToolUsingChat {
         req: CreateChatCompletionRequest,
         recursion_limit: Option<usize>,
         recent_tool_fingerprints: Vec<u64>,
+        plan_mode: bool,
     ) -> Result<CreateChatCompletionResponse, OpenAIError> {
         Box::pin(async move {
             // Don't use spice runtime tools if users has explicitly chosen to not use any tools.
@@ -393,12 +420,129 @@ impl ToolUsingChat {
             let mut fingerprints = recent_tool_fingerprints;
             fingerprints.push(fingerprint);
 
+            // Intercept plan mode tools before normal processing.
+            let mut next_plan_mode = plan_mode;
+            let mut plan_mode_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+            let mut remaining_tool_calls: Vec<ChatCompletionMessageToolCall> = Vec::new();
+
+            for tc in &tool_calls {
+                let decoded_name = decode_tool_name(&tc.function.name);
+                if decoded_name == ENTER_PLAN_MODE_TOOL_NAME {
+                    next_plan_mode = true;
+                    plan_mode_messages.push(
+                        ChatCompletionRequestToolMessageArgs::default()
+                            .content("Plan mode activated. You have access to all tools but MUST only use them for read-only purposes. Research and gather information, then call exit_plan_mode with your plan.")
+                            .tool_call_id(tc.id.clone())
+                            .build()?
+                            .into(),
+                    );
+                } else if decoded_name == EXIT_PLAN_MODE_TOOL_NAME {
+                    let plan_text = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                        .ok()
+                        .and_then(|v| v.get("plan").and_then(|p| p.as_str()).map(String::from))
+                        .unwrap_or_default();
+
+                    if !plan_text.is_empty() {
+                        tracing::info!(target: "task_history", plan = %plan_text, "Agent plan submitted");
+                    }
+
+                    // Auto-call approval tool if one exists
+                    let approval_tool = self.tools.iter().find(|t| {
+                        let n = t.name();
+                        n == "approval" || n == "approval_slack" || n == "approval_ms_teams"
+                    });
+
+                    let tool_response = if let Some(approval) = approval_tool {
+                        let approval_arg = serde_json::json!({
+                            "message": format!("Agent plan requires approval:\n\n{plan_text}"),
+                            "context": plan_text,
+                        }).to_string();
+
+                        tracing::info!(target: "task_history", "Plan submitted for approval, waiting...");
+
+                        match approval.call(&approval_arg).await {
+                            Ok(result) => {
+                                let approved = result.get("approved")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+                                let comment = result.get("comment")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+
+                                if approved {
+                                    next_plan_mode = false;
+                                    let suffix = if comment.is_empty() { String::new() } else { format!(": {comment}") };
+                                    format!("Plan approved{suffix}. You may now proceed with execution.")
+                                } else {
+                                    next_plan_mode = true;
+                                    format!("Plan rejected: {comment}. Revise your plan and call exit_plan_mode again.")
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Approval tool failed, proceeding without approval");
+                                next_plan_mode = false;
+                                format!("Approval tool error ({e}). Proceeding with plan execution.")
+                            }
+                        }
+                    } else {
+                        next_plan_mode = false;
+                        "Plan mode deactivated. All tools are now available. You may proceed with your plan.".to_string()
+                    };
+
+                    plan_mode_messages.push(
+                        ChatCompletionRequestToolMessageArgs::default()
+                            .content(tool_response)
+                            .tool_call_id(tc.id.clone())
+                            .build()?
+                            .into(),
+                    );
+                } else {
+                    remaining_tool_calls.push(tc.clone());
+                }
+            }
+
+            // If plan mode tools were intercepted, we need to handle messages manually
+            let has_plan_mode_tools = !plan_mode_messages.is_empty();
+
             match self
-                .process_tool_calls_and_run_spice_tools(req.messages, tool_calls)
+                .process_tool_calls_and_run_spice_tools(req.messages, remaining_tool_calls)
                 .await?
             {
                 // New messages means we have run spice tools locally, ready to recall model.
                 Some(mut messages) => {
+                    // Insert plan mode tool responses into the message stream
+                    if has_plan_mode_tools {
+                        // The assistant message in `messages` only has non-plan-mode tool calls.
+                        // We need to rebuild it with ALL tool calls (including plan mode ones).
+                        messages = vec![
+                            ChatCompletionRequestAssistantMessageArgs::default()
+                                .tool_calls(
+                                    tool_calls
+                                        .iter()
+                                        .map(|t| ChatCompletionMessageToolCalls::Function(t.clone()))
+                                        .collect::<Vec<_>>(),
+                                )
+                                .build()?
+                                .into(),
+                        ];
+                        // Add plan mode responses first
+                        messages.extend(plan_mode_messages);
+                        // Then add regular tool responses from process_tool_calls
+                        for tc in &tool_calls {
+                            let decoded = decode_tool_name(&tc.function.name);
+                            if decoded != ENTER_PLAN_MODE_TOOL_NAME && decoded != EXIT_PLAN_MODE_TOOL_NAME {
+                                let content = self.call_tool(tc).await;
+                                messages.push(
+                                    ChatCompletionRequestToolMessageArgs::default()
+                                        .content(content.to_string())
+                                        .tool_call_id(tc.id.clone())
+                                        .build()?
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
+
                     // Detect repeated identical tool calls (3 consecutive identical fingerprints).
                     if is_tool_loop_detected(&fingerprints) {
                         tracing::warn!("Tool-use loop detected: identical tool calls repeated 3 times");
@@ -420,6 +564,46 @@ impl ToolUsingChat {
                             ),
                             recursion_limit.map(|r| r - 1),
                             fingerprints,
+                            next_plan_mode,
+                        )
+                        .await
+                    {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Model API request failed after sending tool results");
+                            return Err(e);
+                        }
+                    };
+                    resp.usage = combine_usage(usage, resp.usage);
+                    Ok(resp)
+                }
+                None if has_plan_mode_tools => {
+                    // Only plan mode tools were called — no regular spice tools.
+                    // Build messages manually.
+                    let mut messages = vec![
+                        ChatCompletionRequestAssistantMessageArgs::default()
+                            .tool_calls(
+                                tool_calls
+                                    .iter()
+                                    .map(|t| ChatCompletionMessageToolCalls::Function(t.clone()))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .build()?
+                            .into(),
+                    ];
+                    messages.extend(plan_mode_messages);
+
+                    let mut resp = match self
+                        .chat_request_inner(
+                            create_new_recursive_req(
+                                &inner_req,
+                                messages,
+                                resp.usage.as_ref(),
+                                &self.context_config,
+                            ),
+                            recursion_limit.map(|r| r - 1),
+                            fingerprints,
+                            next_plan_mode,
                         )
                         .await
                     {
@@ -505,6 +689,7 @@ impl ToolUsingChat {
                 self.recursion_limit.map(|r| r - 1),
                 self.context_config.clone(),
                 self.request_logger.clone(),
+                self.plan_mode,
             ),
             req,
             s,
@@ -543,6 +728,7 @@ impl Chat for ToolUsingChat {
             self.recursion_limit,
             self.context_config.clone(),
             Some(RequestLogger::new()),
+            self.plan_mode,
         );
 
         // wrap the completion stream to track the `ai_inferences_with_spice_count` when it is ready.
@@ -569,10 +755,11 @@ impl Chat for ToolUsingChat {
             self.recursion_limit,
             self.context_config.clone(),
             Some(RequestLogger::new()),
+            self.plan_mode,
         );
 
         let response = session
-            .chat_request_inner(inner_req, self.recursion_limit, vec![])
+            .chat_request_inner(inner_req, self.recursion_limit, vec![], self.plan_mode)
             .await;
 
         // track ai_inferences_with_spice_count metric
@@ -1002,6 +1189,21 @@ pub fn encode_tool_name(name: &str) -> String {
         name.replace('_', "__").replace('/', "_")
     } else {
         name.to_string()
+    }
+}
+
+/// Decode an encoded tool name back to its original form.
+fn decode_tool_name(encoded: &str) -> String {
+    // Reverse the encoding: single _ → /, __ → _
+    // We need to handle __ first to avoid double-replacing.
+    if encoded.contains('_') {
+        // Use a two-pass approach with a sentinel
+        encoded
+            .replace("__", "\x00")
+            .replace('_', "/")
+            .replace('\x00', "_")
+    } else {
+        encoded.to_string()
     }
 }
 

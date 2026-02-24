@@ -34,6 +34,7 @@ pub mod ms_teams;
 pub mod plan_mode;
 pub mod read_file;
 pub mod sample;
+pub mod write_file;
 pub mod search;
 pub mod slack;
 pub mod sql;
