@@ -376,10 +376,11 @@ impl ToolUsingChat {
                 tracing::warn!(
                     "Tool-use recursion limit reached. Will call model, but not process further tool calls."
                 );
+                let inner_req = self.add_runtime_tools(&req);
                 if let Some(ref logger) = self.request_logger {
-                    logger.log_request(&req);
+                    logger.log_request(&inner_req);
                 }
-                return self.inner_chat.chat_request(req).await;
+                return self.inner_chat.chat_request(inner_req).await;
             }
 
             tracing::info!(recursion_remaining = recursion_limit, "Calling model");
@@ -664,10 +665,11 @@ impl ToolUsingChat {
             tracing::warn!(
                 "Tool-use recursion limit reached. Will call model, but not process further tool calls."
             );
+            let updated_req = self.add_runtime_tools(&req);
             if let Some(ref logger) = self.request_logger {
-                logger.log_request(&req);
+                logger.log_request(&updated_req);
             }
-            return self.inner_chat.chat_stream(req).await;
+            return self.inner_chat.chat_stream(updated_req).await;
         }
 
         tracing::info!(recursion_remaining = ?self.recursion_limit, "Calling model (streaming)");
