@@ -563,6 +563,7 @@ impl BuiltinToolCatalog {
                             "cherry-pick".to_string(),
                             "commit".to_string(),
                             "push".to_string(),
+                            "reset".to_string(),
                         ]
                     });
                 let github_token = params

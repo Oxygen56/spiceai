@@ -29,7 +29,7 @@ use crate::tools::utils::parameters;
 
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct GitToolParams {
-    /// The git operation: "status", "log", "diff", "show", "remote", "tag", "ls-tree", "ls-remote", "add", "branch", "checkout", "cherry-pick", "commit", "push", "fetch".
+    /// The git operation: "status", "log", "diff", "show", "remote", "tag", "ls-tree", "ls-remote", "add", "branch", "checkout", "cherry-pick", "commit", "push", "fetch", "reset".
     operation: String,
     /// Working directory. Must be an absolute path within repo_path or a tracked worktree.
     /// Prefer using worktree_name instead for worktree operations.
@@ -38,7 +38,7 @@ pub struct GitToolParams {
     commits: Option<Vec<String>>,
     /// For commit: the commit message.
     message: Option<String>,
-    /// For branch/checkout: the branch name.
+    /// For branch/checkout: the branch name. Use "origin/<branch>" to explicitly reference a remote ref.
     branch: Option<String>,
     /// For push: the remote name (defaults to "origin").
     remote: Option<String>,
@@ -55,7 +55,7 @@ const READ_OPERATIONS: &[&str] = &[
     "status", "log", "diff", "show", "remote", "tag", "ls-tree", "ls-remote",
 ];
 const WRITE_OPERATIONS: &[&str] = &[
-    "add", "branch", "checkout", "cherry-pick", "commit", "push", "fetch",
+    "add", "branch", "checkout", "cherry-pick", "commit", "push", "fetch", "reset",
 ];
 
 #[derive(Debug)]
@@ -160,6 +160,19 @@ impl GitTool {
                 if args.iter().any(|a| a == "--force" || a == "-f") {
                     return Err(
                         "Force push is not allowed. Remove '--force' / '-f' from args."
+                            .to_string()
+                            .into(),
+                    );
+                }
+            }
+        }
+
+        // Reject --hard in reset args (destructive — discards uncommitted changes)
+        if req.operation == "reset" {
+            if let Some(ref args) = req.args {
+                if args.iter().any(|a| a == "--hard") {
+                    return Err(
+                        "Hard reset is not allowed. Use '--soft' or '--mixed' (default) instead."
                             .to_string()
                             .into(),
                     );
@@ -323,13 +336,30 @@ impl GitTool {
             }
             "branch" => {
                 cmd.arg("branch");
-                if let Some(ref branch) = req.branch {
+                if let Some(ref args) = req.args {
+                    // Put flags (e.g. -D, --show-current, -m, -f) before branch name
+                    let (flags, positional): (Vec<_>, Vec<_>) =
+                        args.iter().partition(|a| a.starts_with('-'));
+                    cmd.args(&flags);
+                    if let Some(ref branch) = req.branch {
+                        cmd.arg(branch);
+                    }
+                    // Support start-point via commits param (e.g. branch -f feature abc123)
+                    if let Some(ref commits) = req.commits {
+                        if let Some(start) = commits.first() {
+                            cmd.arg(start);
+                        }
+                    }
+                    cmd.args(&positional);
+                } else if let Some(ref branch) = req.branch {
                     cmd.arg(branch);
+                    if let Some(ref commits) = req.commits {
+                        if let Some(start) = commits.first() {
+                            cmd.arg(start);
+                        }
+                    }
                 } else {
                     cmd.arg("--list");
-                }
-                if let Some(ref args) = req.args {
-                    cmd.args(args);
                 }
             }
             "checkout" => {
@@ -405,6 +435,23 @@ impl GitTool {
                 }
                 if let Some(ref args) = req.args {
                     cmd.args(args);
+                }
+            }
+            "reset" => {
+                cmd.arg("reset");
+                if let Some(ref args) = req.args {
+                    cmd.args(args);
+                }
+                if let Some(ref commits) = req.commits {
+                    for c in commits {
+                        cmd.arg(c);
+                    }
+                }
+                if let Some(ref files) = req.files {
+                    cmd.arg("--");
+                    for f in files {
+                        cmd.arg(f);
+                    }
                 }
             }
             "show" => {
@@ -826,6 +873,74 @@ mod tests {
             worktree_name: None,
         };
         assert!(tool.validate_request(&req_cp).is_ok());
+    }
+
+    #[test]
+    fn test_hard_reset_rejected() {
+        let tool = make_tool(
+            vec!["reset"],
+            ToolCapability::ReadWrite,
+        );
+        let req = GitToolParams {
+            operation: "reset".to_string(),
+            working_directory: None,
+            commits: Some(vec!["HEAD~1".to_string()]),
+            message: None,
+            branch: None,
+            remote: None,
+            files: None,
+            args: Some(vec!["--hard".to_string()]),
+            worktree_name: None,
+        };
+        let result = tool.validate_request(&req);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Hard reset is not allowed"),
+            "Expected hard reset rejection"
+        );
+    }
+
+    #[test]
+    fn test_soft_reset_allowed() {
+        let tool = make_tool(
+            vec!["reset"],
+            ToolCapability::ReadWrite,
+        );
+        let req = GitToolParams {
+            operation: "reset".to_string(),
+            working_directory: None,
+            commits: None,
+            message: None,
+            branch: None,
+            remote: None,
+            files: None,
+            args: Some(vec!["--soft".to_string()]),
+            worktree_name: None,
+        };
+        assert!(tool.validate_request(&req).is_ok());
+    }
+
+    #[test]
+    fn test_reset_with_files_allowed() {
+        let tool = make_tool(
+            vec!["reset"],
+            ToolCapability::ReadWrite,
+        );
+        let req = GitToolParams {
+            operation: "reset".to_string(),
+            working_directory: None,
+            commits: None,
+            message: None,
+            branch: None,
+            remote: None,
+            files: Some(vec!["src/main.rs".to_string()]),
+            args: None,
+            worktree_name: None,
+        };
+        assert!(tool.validate_request(&req).is_ok());
     }
 
     #[test]

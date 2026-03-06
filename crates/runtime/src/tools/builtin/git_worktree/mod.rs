@@ -32,16 +32,16 @@ pub use tracker::WorktreeTracker;
 
 #[derive(Debug, Clone, JsonSchema, Serialize, Deserialize)]
 pub struct GitWorktreeToolParams {
-    /// The operation to perform: "create", "list", "status", or "remove".
+    /// The operation to perform: "create", "list", "status", "remove", or "switch".
     operation: String,
 
-    /// For create: the branch name (will be created if it doesn't exist).
+    /// For create/switch: the branch name (will be created if it doesn't exist).
     branch: Option<String>,
 
     /// For create: subdirectory name under the worktree root.
     path_suffix: Option<String>,
 
-    /// For status/remove: the worktree name.
+    /// For status/remove/switch: the worktree name.
     worktree_name: Option<String>,
 }
 
@@ -234,6 +234,55 @@ impl GitWorktreeTool {
             s.is_wt_new() || s.is_wt_modified() || s.is_wt_deleted() || s.is_wt_renamed()
         });
 
+        // Upstream tracking info
+        let upstream = wt_repo
+            .head()
+            .ok()
+            .and_then(|h| {
+                let name = h.shorthand()?.to_string();
+                wt_repo
+                    .find_branch(&name, git2::BranchType::Local)
+                    .ok()
+            })
+            .and_then(|b| {
+                b.upstream()
+                    .ok()
+                    .and_then(|u| u.name().ok().flatten().map(String::from))
+            });
+
+        // Operational state detection
+        let git_dir = if wt_path.join(".git").is_dir() {
+            wt_path.join(".git")
+        } else {
+            // worktrees use a .git file pointing to the actual git dir
+            wt_path.clone()
+        };
+        let state = if git_dir.join("rebase-merge").exists()
+            || git_dir.join("rebase-apply").exists()
+        {
+            "rebasing"
+        } else if git_dir.join("MERGE_HEAD").exists() {
+            "merging"
+        } else if git_dir.join("CHERRY_PICK_HEAD").exists() {
+            "cherry-picking"
+        } else {
+            "clean"
+        };
+
+        // All tracked worktrees
+        let all_worktrees: Vec<Value> = self
+            .tracker
+            .list()
+            .iter()
+            .map(|(name, wt)| {
+                json!({
+                    "name": name,
+                    "branch": wt.branch,
+                    "path": wt.path.to_string_lossy(),
+                })
+            })
+            .collect();
+
         let suggestion = if total_changes == 0 {
             "No uncommitted changes. Worktree is clean and ready for next operation."
         } else if has_unstaged {
@@ -247,8 +296,11 @@ impl GitWorktreeTool {
             "path": wt_path.to_string_lossy(),
             "branch": branch_name,
             "head_commit": head_commit,
+            "upstream": upstream,
+            "state": state,
             "changed_files": changed_files,
             "total_changes": total_changes,
+            "all_worktrees": all_worktrees,
             "suggestion": suggestion,
         }))
     }
@@ -281,6 +333,46 @@ impl GitWorktreeTool {
             "status": "removed",
             "worktree_name": worktree_name,
             "path": wt_path.to_string_lossy(),
+        }))
+    }
+
+    async fn handle_switch(
+        &self,
+        worktree_name: &str,
+        branch: &str,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let tracked = self.tracker.get(worktree_name).ok_or_else(|| {
+            format!("Worktree '{worktree_name}' is not tracked. Use 'status' or 'list' to find available worktrees.")
+        })?;
+
+        tracing::debug!(worktree_name = %worktree_name, branch = %branch, path = %tracked.path.display(), "Switching worktree branch");
+
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.current_dir(&tracked.path);
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd.arg("checkout").arg(branch);
+
+        let output = cmd.output().await?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            return Err(format!(
+                "Failed to switch worktree '{worktree_name}' to branch '{branch}': {stderr}"
+            )
+            .into());
+        }
+
+        // Update the tracker with the new branch
+        self.tracker.update_branch(worktree_name, branch.to_string());
+
+        Ok(json!({
+            "status": "switched",
+            "worktree_name": worktree_name,
+            "path": tracked.path.to_string_lossy(),
+            "branch": branch,
+            "stdout": stdout,
+            "stderr": stderr,
         }))
     }
 }
@@ -333,8 +425,17 @@ impl SpiceModelTool for GitWorktreeTool {
                     )?;
                     self.handle_remove(worktree_name)
                 }
+                "switch" => {
+                    let worktree_name = req.worktree_name.as_deref().ok_or(
+                        "The 'worktree_name' parameter is required for the 'switch' operation",
+                    )?;
+                    let branch = req.branch.as_deref().ok_or(
+                        "The 'branch' parameter is required for the 'switch' operation",
+                    )?;
+                    self.handle_switch(worktree_name, branch).await
+                }
                 other => Err(format!(
-                    "Unknown operation '{other}'. Valid operations are: create, list, status, remove"
+                    "Unknown operation '{other}'. Valid operations are: create, list, status, remove, switch"
                 )
                 .into()),
             }

@@ -87,6 +87,20 @@ impl WorktreeTracker {
         }
     }
 
+    /// Update the branch name for a tracked worktree.
+    pub fn update_branch(&self, name: &str, branch: String) {
+        match self.inner.lock() {
+            Ok(mut map) => {
+                if let Some(tracked) = map.get_mut(name) {
+                    tracked.branch = branch;
+                }
+            }
+            Err(e) => {
+                tracing::error!("WorktreeTracker lock poisoned in update_branch(): {e}");
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match self.inner.lock() {
             Ok(map) => map.is_empty(),
