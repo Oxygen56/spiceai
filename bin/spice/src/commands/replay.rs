@@ -37,6 +37,10 @@ pub struct ReplayArgs {
     /// Custom HTTP headers in format 'Key:Value' (can be specified multiple times)
     #[arg(long = "headers", value_name = "KEY:VALUE")]
     pub custom_headers: Vec<String>,
+
+    /// Number of times to replay the request (default: 1)
+    #[arg(short = 'n', long = "repeat", default_value = "1")]
+    pub repeat: usize,
 }
 
 #[derive(Deserialize)]
@@ -112,84 +116,90 @@ pub async fn execute(ctx: &RuntimeContext, args: &ReplayArgs) -> Result<()> {
         .unwrap_or_else(|| ctx.http_endpoint());
     let url = format!("{base_endpoint}/v1/chat/completions");
 
-    eprintln!("Replaying {} -> {url}", args.file);
-
     let streaming_client = reqwest::Client::builder().build().unwrap_or_default();
 
-    let mut request = streaming_client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .header("X-Spice-Single-Shot", "true")
-        .json(&body);
-
-    for (key, value) in ctx.get_headers() {
-        request = request.header(&key, &value);
-    }
-
-    for header in &args.custom_headers {
-        if let Some((key, value)) = header.split_once(':') {
-            request = request.header(key.trim(), value.trim());
+    for i in 1..=args.repeat {
+        if args.repeat > 1 {
+            eprintln!("\n--- Run {i}/{} ---", args.repeat);
         }
-    }
+        // eprintln!("Replaying {} -> {url}", args.file);
 
-    let response = request
-        .send()
-        .await
-        .context(ConnectionFailedSnafu { endpoint: &url })?;
+        let mut request = streaming_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("X-Spice-Single-Shot", "true")
+            .json(&body);
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(InvalidResponseSnafu {
-            message: format!("Replay request failed: {status} - {text}"),
+        for (key, value) in ctx.get_headers() {
+            request = request.header(&key, &value);
         }
-        .build());
-    }
 
-    let mut stream = response.bytes_stream();
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = match chunk_result {
-            Ok(chunk) => chunk,
-            Err(e) => {
-                eprintln!("\n\x1b[33mWarning:\x1b[0m Stream interrupted: {e}");
-                break;
+        for header in &args.custom_headers {
+            if let Some((key, value)) = header.split_once(':') {
+                request = request.header(key.trim(), value.trim());
             }
-        };
+        }
 
-        let text = String::from_utf8_lossy(&chunk);
-        for line in text.lines() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                if data == "[DONE]" {
-                    continue;
+        let response = request
+            .send()
+            .await
+            .context(ConnectionFailedSnafu { endpoint: &url })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(InvalidResponseSnafu {
+                message: format!("Replay request failed: {status} - {text}"),
+            }
+            .build());
+        }
+
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    eprintln!("\n\x1b[33mWarning:\x1b[0m Stream interrupted: {e}");
+                    break;
                 }
-                if let Ok(chat_chunk) = serde_json::from_str::<ChatChunk>(data) {
-                    for choice in &chat_chunk.choices {
-                        if let Some(content) = &choice.delta.content {
-                            print!("{content}");
-                            let _ = io::stdout().flush();
-                        }
-                        if let Some(tool_calls) = &choice.delta.tool_calls {
-                            for tc in tool_calls {
-                                if let Some(ref func) = tc.function {
-                                    if let Some(ref name) = func.name {
-                                        print!("\n[tool_call: {name}");
-                                    }
-                                    if let Some(ref args) = func.arguments {
-                                        print!("{args}");
+            };
+
+            let text = String::from_utf8_lossy(&chunk);
+            for line in text.lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        continue;
+                    }
+                    if let Ok(chat_chunk) = serde_json::from_str::<ChatChunk>(data) {
+                        for choice in &chat_chunk.choices {
+                            if let Some(content) = &choice.delta.content {
+                                print!("{content}");
+                                let _ = io::stdout().flush();
+                            }
+                            if let Some(tool_calls) = &choice.delta.tool_calls {
+                                for tc in tool_calls {
+                                    if let Some(ref func) = tc.function {
+                                        if let Some(ref name) = func.name {
+                                            print!("\n[tool_call: {name}");
+                                        }
+                                        if let Some(ref args) = func.arguments {
+                                            print!("{args}");
+                                        }
                                     }
                                 }
+                                let _ = io::stdout().flush();
                             }
-                            let _ = io::stdout().flush();
                         }
+                    } else if let Ok(sse_error) = serde_json::from_str::<SseError>(data) {
+                        eprintln!("\n\x1b[31mError:\x1b[0m {}", sse_error.error.message);
                     }
-                } else if let Ok(sse_error) = serde_json::from_str::<SseError>(data) {
-                    eprintln!("\n\x1b[31mError:\x1b[0m {}", sse_error.error.message);
                 }
             }
         }
+
+        println!();
     }
 
-    println!();
     Ok(())
 }

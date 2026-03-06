@@ -42,6 +42,7 @@ pub struct ResponsesWrapper {
     pub public_name: String,
     pub responses: Arc<dyn Responses>,
     pub system_prompt: Option<String>,
+    pub request_logger: Option<crate::model::request_logger::RequestLogger>,
 }
 
 impl ResponsesWrapper {
@@ -54,7 +55,13 @@ impl ResponsesWrapper {
             public_name: public_name.to_string(),
             responses,
             system_prompt: system_prompt.map(ToString::to_string),
+            request_logger: None,
         }
+    }
+
+    pub fn with_request_logger(mut self, logger: crate::model::request_logger::RequestLogger) -> Self {
+        self.request_logger = Some(logger);
+        self
     }
 
     fn prepare_req(&self, req: CreateResponse) -> CreateResponse {
@@ -79,6 +86,9 @@ impl Responses for ResponsesWrapper {
     async fn responses_stream(&self, req: CreateResponse) -> Result<ResponseStream, OpenAIError> {
         let start = Instant::now();
         let req = self.prepare_req(req);
+        if let Some(ref logger) = self.request_logger {
+            logger.log_request(&req);
+        }
         let Some(ref model_id) = req.model else {
             return Err(OpenAIError::InvalidArgument(
                 "Model ID must be specified in the request".into(),
@@ -131,6 +141,9 @@ impl Responses for ResponsesWrapper {
         };
 
         let req = self.prepare_req(req);
+        if let Some(ref logger) = self.request_logger {
+            logger.log_request(&req);
+        }
         let span = tracing::span!(target: "task_history", tracing::Level::INFO, "responses", stream=false, model = %model_id, input = %serde_json::to_string(&req).unwrap_or_default());
 
         let labels = request_labels_responses(&req);

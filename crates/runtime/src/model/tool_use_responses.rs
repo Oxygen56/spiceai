@@ -41,7 +41,6 @@ use tools::SpiceModelTool;
 use tracing::{Instrument, Span};
 
 use crate::model::context::{ContextConfig, manage_responses_context, truncate_tool_output};
-use crate::model::request_logger::RequestLogger;
 use crate::model::tool_use::encode_tool_name;
 use runtime_request_context::{AsyncMarker, RequestContext};
 
@@ -84,7 +83,6 @@ pub struct ToolUsingResponses {
     tools: Vec<Arc<dyn SpiceModelTool>>,
     recursion_limit: Option<usize>,
     context_config: ContextConfig,
-    request_logger: Option<RequestLogger>,
 }
 
 impl ToolUsingResponses {
@@ -102,17 +100,15 @@ impl ToolUsingResponses {
             tools,
             recursion_limit,
             context_config,
-            request_logger: None,
         }
     }
 
-    fn new_with_logger(
+    fn new_for_recursion(
         inner_responses: Arc<dyn Responses>,
         openai_tools: Vec<OpenAIResponsesTools>,
         tools: Vec<Arc<dyn SpiceModelTool>>,
         recursion_limit: Option<usize>,
         context_config: ContextConfig,
-        request_logger: Option<RequestLogger>,
     ) -> Self {
         Self {
             inner_responses,
@@ -120,7 +116,6 @@ impl ToolUsingResponses {
             tools,
             recursion_limit,
             context_config,
-            request_logger,
         }
     }
 
@@ -325,9 +320,6 @@ impl ToolUsingResponses {
                 .is_some_and(|t| matches!(t, ToolChoiceParam::Mode(ToolChoiceOptions::None)))
             {
                 tracing::debug!("User asked for no tools, calling inner chat model");
-                if let Some(ref logger) = self.request_logger {
-                    logger.log_request(&req);
-                }
                 return self.inner_responses.responses_request(req).await;
             }
 
@@ -335,9 +327,6 @@ impl ToolUsingResponses {
                 tracing::warn!(
                     "Tool-use recursion limit reached. Will call model, but not process further tool calls."
                 );
-                if let Some(ref logger) = self.request_logger {
-                    logger.log_request(&req);
-                }
                 return self.inner_responses.responses_request(req).await;
             }
 
@@ -346,9 +335,6 @@ impl ToolUsingResponses {
             // Append spiced runtime tools to the request.
             let inner_req = self.add_runtime_tools(&req);
 
-            if let Some(ref logger) = self.request_logger {
-                logger.log_request(&inner_req);
-            }
             let resp = match self
                 .inner_responses
                 .responses_request(inner_req.clone())
@@ -435,9 +421,6 @@ impl ToolUsingResponses {
                 .is_some_and(|t| matches!(t, ToolChoiceParam::Mode(ToolChoiceOptions::None)))
             {
                 tracing::debug!("User asked for no tools, calling inner responses model");
-                if let Some(ref logger) = self.request_logger {
-                    logger.log_request(&req);
-                }
                 return self.inner_responses.responses_stream(req).await;
             }
 
@@ -445,9 +428,6 @@ impl ToolUsingResponses {
                 tracing::warn!(
                     "Tool-use recursion limit reached. Will call model, but not process further tool calls."
                 );
-                if let Some(ref logger) = self.request_logger {
-                    logger.log_request(&req);
-                }
                 return self.inner_responses.responses_stream(req).await;
             }
 
@@ -456,9 +436,6 @@ impl ToolUsingResponses {
             // Append spiced runtime tools to the request.
             let inner_req = self.add_runtime_tools(&req);
 
-            if let Some(ref logger) = self.request_logger {
-                logger.log_request(&inner_req);
-            }
             let s = match self
                 .inner_responses
                 .responses_stream(inner_req.clone())
@@ -474,13 +451,12 @@ impl ToolUsingResponses {
             Ok(make_responses_stream(
                 Span::current(),
                 RequestContext::current(AsyncMarker::new().await),
-                Self::new_with_logger(
+                Self::new_for_recursion(
                     Arc::clone(&self.inner_responses),
                     self.openai_tools.clone(),
                     self.tools.clone(),
                     recursion_limit.map(|r| r - 1),
                     self.context_config.clone(),
-                    self.request_logger.clone(),
                 ),
                 req,
                 s,
@@ -514,13 +490,12 @@ impl Responses for ToolUsingResponses {
 
     async fn responses_stream(&self, req: CreateResponse) -> Result<ResponseStream, OpenAIError> {
         let inner_req = self.prepare_req(req.clone());
-        let session = Self::new_with_logger(
+        let session = Self::new_for_recursion(
             Arc::clone(&self.inner_responses),
             self.openai_tools.clone(),
             self.tools.clone(),
             self.recursion_limit,
             self.context_config.clone(),
-            Some(RequestLogger::new()),
         );
         session
             .responses_stream_inner(inner_req, self.recursion_limit)
@@ -529,13 +504,12 @@ impl Responses for ToolUsingResponses {
 
     async fn responses_request(&self, req: CreateResponse) -> Result<Response, OpenAIError> {
         let inner_req = self.prepare_req(req);
-        let session = Self::new_with_logger(
+        let session = Self::new_for_recursion(
             Arc::clone(&self.inner_responses),
             self.openai_tools.clone(),
             self.tools.clone(),
             self.recursion_limit,
             self.context_config.clone(),
-            Some(RequestLogger::new()),
         );
         session
             .responses_request_inner(inner_req, self.recursion_limit, vec![])

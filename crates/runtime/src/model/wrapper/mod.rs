@@ -82,6 +82,7 @@ pub struct ChatWrapper {
     /// If true, the system prompt will be treated as a template and will be parameterized with the input prompt.
     pub attempt_to_template_system_prompt: bool,
     pub defaults: Vec<(String, serde_json::Value)>,
+    pub request_logger: Option<crate::model::request_logger::RequestLogger>,
 }
 
 /// Sets a certain field in a [`CreateChatCompletionRequest`] to a given value.
@@ -118,6 +119,7 @@ impl ChatWrapper {
             system_prompt: system_prompt.map(ToString::to_string),
             defaults,
             attempt_to_template_system_prompt: false,
+            request_logger: None,
         };
 
         // Check defaults provided are valid at startup.
@@ -137,6 +139,11 @@ impl ChatWrapper {
         {
             self.attempt_to_template_system_prompt = true;
         }
+        self
+    }
+
+    pub fn with_request_logger(mut self, logger: crate::model::request_logger::RequestLogger) -> Self {
+        self.request_logger = Some(logger);
         self
     }
 
@@ -195,11 +202,18 @@ impl ChatWrapper {
             _ => None,
         };
         if let Some(prompt) = prompt_opt {
-            let system_message = ChatCompletionRequestSystemMessageArgs::default()
-                .content(prompt)
-                .build()?;
-            req.messages
-                .insert(0, ChatCompletionRequestMessage::System(system_message));
+            // Skip if request already has a system message (e.g. during replay)
+            let already_has_system = req
+                .messages
+                .first()
+                .is_some_and(|m| matches!(m, ChatCompletionRequestMessage::System(_)));
+            if !already_has_system {
+                let system_message = ChatCompletionRequestSystemMessageArgs::default()
+                    .content(prompt)
+                    .build()?;
+                req.messages
+                    .insert(0, ChatCompletionRequestMessage::System(system_message));
+            }
         }
         Ok(req)
     }

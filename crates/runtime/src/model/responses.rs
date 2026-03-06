@@ -158,11 +158,10 @@ fn construct_model(
         None => None,
     };
 
-    Ok(Arc::new(ResponsesWrapper::new(
-        model,
-        component.name.as_str(),
-        system_prompt,
-    )))
+    Ok(Arc::new(
+        ResponsesWrapper::new(model, component.name.as_str(), system_prompt)
+            .with_request_logger(crate::model::request_logger::RequestLogger::new()),
+    ))
 }
 
 fn openai(model_id: Option<String>, params: &Parameters) -> Result<Arc<dyn Responses>, LlmError> {

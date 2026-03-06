@@ -186,7 +186,8 @@ pub async fn construct_model(
         component.name.as_str(),
         system_prompt,
         get_openai_request_overrides(component, params.prefix()),
-    );
+    )
+    .with_request_logger(crate::model::request_logger::RequestLogger::new());
 
     if let Some(Value::String(s)) = component.params.get("parameterized_prompt")
         && matches!(s.as_str(), "enabled")
