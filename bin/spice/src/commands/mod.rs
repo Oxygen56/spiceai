@@ -34,6 +34,7 @@ pub mod nsql;
 pub mod pods;
 pub mod query;
 pub mod refresh;
+pub mod replay;
 pub mod run;
 pub mod search;
 pub mod sql;

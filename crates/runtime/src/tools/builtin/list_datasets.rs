@@ -128,7 +128,7 @@ pub async fn get_table_elements(
     rt: Arc<Runtime>,
     opt_include: Option<&ResolvedTableAwareAllowlist>,
 ) -> Vec<ListDatasetElement> {
-    let Some(app) = &*rt.app.read().await else {
+    let Some(app) = rt.read_app().await else {
         return vec![];
     };
 
@@ -152,7 +152,7 @@ pub async fn get_catalog_elements(
     rt: Arc<Runtime>,
     opt_include: Option<&ResolvedTableAwareAllowlist>,
 ) -> Vec<ListDatasetElement> {
-    let Some(ref app) = *rt.app.read().await else {
+    let Some(ref app) = rt.read_app().await else {
         return vec![];
     };
 
@@ -193,7 +193,7 @@ pub async fn get_view_elements(
     rt: Arc<Runtime>,
     opt_include: Option<&ResolvedTableAwareAllowlist>,
 ) -> Vec<ListDatasetElement> {
-    let Some(app) = &*rt.app.read().await else {
+    let Some(app) = rt.read_app().await else {
         return vec![];
     };
 

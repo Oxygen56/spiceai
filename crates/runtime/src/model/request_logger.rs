@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 /// Logs each model API request to a numbered JSON file within a session directory.
 ///
-/// Each chat session creates a timestamped folder under `.spice/data/requests/`.
+/// Each chat session creates a timestamped folder under `chat_log/` next to
+/// the `spicepod.yaml` (i.e. in the current working directory).
 /// Every model API call (including recursive tool-use calls) is saved as
 /// `{NNN}_request.json`, forming a replayable checkpoint of the conversation.
 #[derive(Clone)]
@@ -30,12 +31,11 @@ pub struct RequestLogger {
 }
 
 impl RequestLogger {
-    /// Creates a new session directory under `.spice/data/requests/{timestamp}/`.
+    /// Creates a new session directory under `chat_log/{timestamp}/`.
     pub fn new() -> Self {
         let timestamp = chrono::Local::now().format("%Y-%m-%dT%H-%M-%S").to_string();
-        let session_dir = PathBuf::from(crate::spice_data_base_path())
-            .join("requests")
-            .join(&timestamp);
+        let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let session_dir = base.join("data/.chat_log").join(&timestamp);
 
         if let Err(e) = std::fs::create_dir_all(&session_dir) {
             tracing::warn!(error = %e, path = %session_dir.display(), "Failed to create request log session directory");

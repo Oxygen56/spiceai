@@ -33,8 +33,7 @@ use util::{RetryError, fibonacci_backoff::FibonacciBackoffBuilder, retry};
 
 impl Runtime {
     pub(crate) async fn load_tools(self: Arc<Self>) {
-        let app_lock = self.app.read().await;
-        if let Some(app) = app_lock.as_ref() {
+        if let Some(app) = self.read_app().await {
             for tool in &app.tools {
                 tracing::debug!("Loading tool [{}] from {}...", tool.name, tool.from);
                 Arc::clone(&self).load_tool(tool).await;
@@ -62,7 +61,7 @@ impl Runtime {
         let _ = join_all(spawned_tasks).await;
 
         // Register tools declared on file_sources so they're available when models snapshot tools.
-        if let Some(app) = app_lock.as_ref() {
+        if let Some(app) = self.read_app().await {
             let catalog = BuiltinToolCatalog::new(Arc::clone(&self))
                 .with_approval_store(self.approval_store())
                 .with_worktree_tracker(self.worktree_tracker());
@@ -162,8 +161,10 @@ impl Runtime {
                 }
                 Err(e) => {
                     metrics::tools::LOAD_ERROR.add(1, &[]);
-                    self.status
-                        .update_tool(&tool.name, status::ComponentStatus::Error);
+                    self.status.update_tool(
+                        &tool.name,
+                        status::ComponentStatus::error_with_message(e.to_string()),
+                    );
                     tracing::warn!(
                         "Unable to load tool '{}' from spicepod. Error: {}",
                         tool.name,
@@ -247,7 +248,7 @@ impl Runtime {
                 Err(e) => {
                     metrics::tools::LOAD_ERROR.add(1, &[]);
                     self.status
-                        .update_tool(&tool_component.name, status::ComponentStatus::Error);
+                        .update_tool(&tool_component.name, status::ComponentStatus::Error(None));
                     tracing::warn!(
                         "Unable to load write tool '{}' from spicepod. Error: {}",
                         tool_component.name,

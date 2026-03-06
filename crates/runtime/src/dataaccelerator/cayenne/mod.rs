@@ -32,6 +32,7 @@ use datafusion::common::DFSchema;
 use datafusion::common::arrow::datatypes::SchemaRef;
 use datafusion::datasource::TableProvider;
 use datafusion::error::DataFusionError;
+use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_expr::{CreateExternalTable, TableProviderFilterPushDown};
 use datafusion::prelude::Expr;
 use datafusion::scalar::ScalarValue;
@@ -95,8 +96,11 @@ pub enum Error {
     ))]
     PartitionByRequired,
 
-    #[snafu(display("Cayenne acceleration S3 storage error: {source}"))]
+    #[snafu(display("Cayenne S3 acceleration error: {source}"))]
     S3Error { source: s3::Error },
+
+    #[snafu(display("RuntimeEnv is required for Cayenne accelerator but was not provided"))]
+    RuntimeEnvRequired,
 }
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -124,7 +128,7 @@ fn is_vortex_supported_type(data_type: &DataType) -> bool {
 /// Transform schema according to `unsupported_type_action` policy
 /// Always converts Float16 to Float32 and normalizes timestamps to Microsecond (these are compatible transformations)
 /// Handles truly unsupported types according to the action: String (convert to Utf8) or Error (return error)
-fn transform_schema_for_vortex(
+pub(crate) fn transform_schema_for_vortex(
     schema: &arrow::datatypes::Schema,
     unsupported_type_action: UnsupportedTypeAction,
 ) -> Result<arrow::datatypes::Schema> {
@@ -319,10 +323,6 @@ impl CayenneAccelerator {
     ///
     /// Returns a vector of S3 paths, one for each zone. The first zone is the primary zone
     /// used for reads; all zones are used for writes (ACID replication).
-    #[expect(
-        dead_code,
-        reason = "Will be used when multi-zone write support is implemented"
-    )]
     fn cayenne_data_dirs_multi_zone(&self, source: &dyn AccelerationSource) -> Result<Vec<String>> {
         let zone_ids = s3::get_s3_zone_ids(source);
         if zone_ids.is_empty() {
@@ -407,15 +407,34 @@ impl CayenneAccelerator {
     }
 
     fn resolve_storage_config(&self, source: &dyn AccelerationSource) -> Result<String> {
-        self.file_path(source)
+        let paths = self
+            .cayenne_data_dirs_multi_zone(source)
             .boxed()
-            .context(AccelerationCreationFailedSnafu)
+            .context(AccelerationCreationFailedSnafu)?;
+
+        if paths.len() > 1 {
+            return Err(Error::InvalidConfiguration {
+                detail: Arc::from(
+                    "Cayenne multi-zone S3 Express writes are not implemented yet. Configure a single zone in 'cayenne_s3_zone_ids' or use a single-zone 'cayenne_file_path'.",
+                ),
+            });
+        }
+
+        paths
+            .first()
+            .cloned()
+            .ok_or_else(|| Error::InvalidConfiguration {
+                detail: Arc::from("Unable to resolve Cayenne storage path"),
+            })
     }
 
     fn get_unsupported_type_action(source: &dyn AccelerationSource) -> UnsupportedTypeAction {
         // Check if unsupported_type_action is specified in acceleration params
         if let Some(acceleration) = source.acceleration()
-            && let Some(action_str) = acceleration.params.get("unsupported_type_action")
+            && let Some(action_str) = acceleration
+                .params
+                .get("cayenne_unsupported_type_action")
+                .or_else(|| acceleration.params.get("unsupported_type_action"))
         {
             match action_str.to_lowercase().as_str() {
                 "error" => return UnsupportedTypeAction::Error,
@@ -483,7 +502,11 @@ impl CayenneAccelerator {
             }
 
             // Parse sort columns
-            if let Some(sort_cols_str) = acceleration.params.get("sort_columns") {
+            if let Some(sort_cols_str) = acceleration
+                .params
+                .get("cayenne_sort_columns")
+                .or_else(|| acceleration.params.get("sort_columns"))
+            {
                 config.sort_columns = sort_cols_str
                     .split(',')
                     .map(|s| s.trim().to_string())
@@ -634,6 +657,7 @@ impl CayenneAccelerator {
         time_retention_filter_builder: Option<cayenne::TimeRetentionFilterBuilder>,
         primary_keys: Vec<String>,
         on_conflict: Option<datafusion_table_providers::util::on_conflict::OnConflict>,
+        runtime_env: Arc<RuntimeEnv>,
     ) -> Result<Arc<cayenne::CayenneTableProvider>> {
         use cayenne::{CayenneTableProviderBuilder, metadata::CreateTableOptions};
 
@@ -686,9 +710,14 @@ impl CayenneAccelerator {
             vortex_config,
         };
 
+        // Create shared Cayenne context with the runtime's RuntimeEnv
+        let context =
+            cayenne::CayenneContext::new(&table_options.vortex_config, Arc::clone(&runtime_env));
+
         // Create CayenneTableProvider with object store for S3 Express One Zone
-        let mut builder =
-            CayenneTableProviderBuilder::new(catalog).with_retention_filters(retention_filters);
+        let mut builder = CayenneTableProviderBuilder::new(catalog, runtime_env)
+            .with_context(context)
+            .with_retention_filters(retention_filters);
         if let Some(retention_builder) = time_retention_filter_builder {
             builder = builder.with_time_retention_filter_builder(retention_builder);
         }
@@ -745,7 +774,7 @@ const PARAMETERS: &[ParameterSpec] = &concat_arrays::<
         ParameterSpec::component("segment_cache_mb")
             .description("Size of the in-memory Vortex segment cache in MB. Set > 0 to cache decompressed data segments. Default: 256 MB")
             .default("256"),
-        ParameterSpec::component("cayenne_target_file_size_mb")
+        ParameterSpec::component("target_file_size_mb")
             .description("Target size for Vortex data files in MB. Default: 256 MB. Adjust as needed for S3 Express or remote upload scenarios.")
             .default("256"),
         ParameterSpec::component("sort_columns")
@@ -754,7 +783,7 @@ const PARAMETERS: &[ParameterSpec] = &concat_arrays::<
             .description("Compression strategy to use for Vortex files. Options: 'btrblocks' (default), 'zstd'")
             .one_of(&["btrblocks", "zstd"])
             .default("btrblocks"),
-        ParameterSpec::component("cayenne_upload_concurrency")
+        ParameterSpec::component("upload_concurrency")
             .description("Maximum number of concurrent file uploads when writing multiple Vortex files. Default: 4.")
             .default("4"),
     ],
@@ -849,6 +878,14 @@ impl DataAccelerator for CayenneAccelerator {
                 return Err(Box::new(Error::InvalidConfiguration {
                     detail: Arc::from(
                         "Cannot specify both 'cayenne_s3_zone_ids' and 'cayenne_file_path' with an S3 Express path. Use either 'cayenne_s3_zone_ids' for auto-generated bucket names, or 'cayenne_file_path' for explicit bucket paths.",
+                    ),
+                }));
+            }
+
+            if s3::is_multi_zone_s3_express(source) {
+                return Err(Box::new(Error::InvalidConfiguration {
+                    detail: Arc::from(
+                        "Cayenne multi-zone S3 Express writes are not implemented yet. Configure a single zone in 'cayenne_s3_zone_ids' or use a single-zone 'cayenne_file_path'.",
                     ),
                 }));
             }
@@ -973,7 +1010,12 @@ impl DataAccelerator for CayenneAccelerator {
         cmd: CreateExternalTable,
         source: Option<&dyn AccelerationSource>,
         partition_by: Vec<PartitionedBy>,
+        runtime_env: Option<Arc<RuntimeEnv>>,
     ) -> Result<Arc<dyn TableProvider>, Box<dyn std::error::Error + Send + Sync>> {
+        // Cayenne requires a RuntimeEnv to share caches (list_files_cache, object stores)
+        // with the main query engine. This must always be provided by the runtime.
+        let runtime_env = runtime_env.context(RuntimeEnvRequiredSnafu).boxed()?;
+
         // Cayenne requires a source for file mode with directory-based storage
         let source = source.ok_or_else(|| {
             Box::new(Error::InvalidConfiguration {
@@ -1056,6 +1098,7 @@ impl DataAccelerator for CayenneAccelerator {
                 time_retention_filter_builder.clone(),
                 primary_keys.clone(),
                 on_conflict.clone(),
+                Arc::clone(&runtime_env),
             )
             .await
             .boxed()?;
@@ -1149,6 +1192,7 @@ impl DataAccelerator for CayenneAccelerator {
                 object_store_config,
                 primary_keys,
                 on_conflict,
+                runtime_env,
             ));
 
             // Wrap the base table provider with partitioning logic
@@ -1276,11 +1320,12 @@ impl CayennePartitionCreator {
         object_store_config: Option<cayenne::metadata::ObjectStoreConfig>,
         primary_key: Vec<String>,
         on_conflict: Option<datafusion_table_providers::util::on_conflict::OnConflict>,
+        runtime_env: Arc<RuntimeEnv>,
     ) -> Self {
         // Create shared Cayenne context with cache once, to be shared across all partitions.
         // This ensures all partitions share the same footer/segment caches instead of
         // each partition creating its own cache.
-        let context = cayenne::CayenneContext::new(&vortex_config);
+        let context = cayenne::CayenneContext::new(&vortex_config, runtime_env);
 
         Self {
             table_name,
@@ -1394,7 +1439,6 @@ impl PartitionCreator for CayennePartitionCreator {
         std::fs::create_dir_all(&partition_dir)
             .boxed()
             .context(creator::CreatePartitionSnafu)?;
-
         let partition_column_names = self.partition_column_labels();
 
         // Create composite key for table naming (slash-separated values)
@@ -1428,9 +1472,12 @@ impl PartitionCreator for CayennePartitionCreator {
 
         // Create Cayenne table provider for this partition with S3 support.
         // Use the shared context to share footer/segment caches across partitions.
-        let mut builder = cayenne::CayenneTableProviderBuilder::new(Arc::clone(&self.catalog))
-            .with_retention_filters(self.retention_filters.clone())
-            .with_context(Arc::clone(&self.context));
+        let mut builder = cayenne::CayenneTableProviderBuilder::new(
+            Arc::clone(&self.catalog),
+            Arc::clone(self.context.runtime_env()),
+        )
+        .with_context(Arc::clone(&self.context))
+        .with_retention_filters(self.retention_filters.clone());
         if let Some(ref retention_builder) = self.time_retention_filter_builder {
             builder = builder.with_time_retention_filter_builder(retention_builder.clone());
         }
@@ -1498,9 +1545,12 @@ impl PartitionCreator for CayennePartitionCreator {
 
             // Use builder pattern to pass object store config for S3 support.
             // Use the shared context to share footer/segment caches across partitions.
-            let mut builder = cayenne::CayenneTableProviderBuilder::new(Arc::clone(&self.catalog))
-                .with_retention_filters(self.retention_filters.clone())
-                .with_context(Arc::clone(&self.context));
+            let mut builder = cayenne::CayenneTableProviderBuilder::new(
+                Arc::clone(&self.catalog),
+                Arc::clone(self.context.runtime_env()),
+            )
+            .with_context(Arc::clone(&self.context))
+            .with_retention_filters(self.retention_filters.clone());
             if let Some(ref retention_builder) = self.time_retention_filter_builder {
                 builder = builder.with_time_retention_filter_builder(retention_builder.clone());
             }
