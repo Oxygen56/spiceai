@@ -301,6 +301,9 @@ impl Chat for ChatWrapper {
     ) -> Result<ChatCompletionResponseStream, OpenAIError> {
         let start = Instant::now();
         let req = self.prepare_req(req)?;
+        if let Some(ref logger) = self.request_logger {
+            logger.log_request(&req);
+        }
         let span = tracing::span!(target: "task_history", tracing::Level::INFO, "ai_completion", stream=true, model = %req.model, input = %serde_json::to_string(&req).unwrap_or_default());
 
         if let Some(metadata) = &req.metadata {
@@ -344,6 +347,11 @@ impl Chat for ChatWrapper {
         let start = Instant::now();
 
         let req = self.prepare_req(req)?;
+
+        if let Some(ref logger) = self.request_logger {
+            logger.log_request(&req);
+        }
+
         let span = tracing::span!(target: "task_history", tracing::Level::INFO, "ai_completion", stream=false, model = %req.model, input = %serde_json::to_string(&req).unwrap_or_default());
 
         let labels = request_labels(&req);

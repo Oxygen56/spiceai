@@ -120,7 +120,7 @@ impl ToolUsingResponses {
     }
 
     fn prepare_req(&self, mut req: CreateResponse) -> CreateResponse {
-        let existing_items = to_input_item(req.input.clone());
+        let existing_items = to_input_item(req.input.clone(), Role::User);
 
         let openai_tool_definitions: Vec<ToolDefinition> = self
             .openai_tools
@@ -327,13 +327,18 @@ impl ToolUsingResponses {
                 tracing::warn!(
                     "Tool-use recursion limit reached. Will call model, but not process further tool calls."
                 );
+                let mut req = req;
+                let git_state = super::tool_use::get_git_state_context().await;
+                append_git_state_to_responses_request(&mut req, &git_state);
                 return self.inner_responses.responses_request(req).await;
             }
 
             tracing::info!(recursion_remaining = recursion_limit, "Calling model (responses API)");
 
             // Append spiced runtime tools to the request.
-            let inner_req = self.add_runtime_tools(&req);
+            let mut inner_req = self.add_runtime_tools(&req);
+            let git_state = super::tool_use::get_git_state_context().await;
+            append_git_state_to_responses_request(&mut inner_req, &git_state);
 
             let resp = match self
                 .inner_responses
@@ -365,7 +370,7 @@ impl ToolUsingResponses {
             fingerprints.push(fingerprint);
 
             match self
-                .process_tool_calls_and_run_spice_tools(to_input_item(req.input), tools_used)
+                .process_tool_calls_and_run_spice_tools(to_input_item(req.input, Role::User), tools_used)
                 .await?
             {
                 // New messages means we have run spice tools locally, ready to recall model.
@@ -428,13 +433,18 @@ impl ToolUsingResponses {
                 tracing::warn!(
                     "Tool-use recursion limit reached. Will call model, but not process further tool calls."
                 );
+                let mut req = req;
+                let git_state = super::tool_use::get_git_state_context().await;
+                append_git_state_to_responses_request(&mut req, &git_state);
                 return self.inner_responses.responses_stream(req).await;
             }
 
             tracing::info!(recursion_remaining = recursion_limit, "Calling model (responses API stream)");
 
             // Append spiced runtime tools to the request.
-            let inner_req = self.add_runtime_tools(&req);
+            let mut inner_req = self.add_runtime_tools(&req);
+            let git_state = super::tool_use::get_git_state_context().await;
+            append_git_state_to_responses_request(&mut inner_req, &git_state);
 
             let s = match self
                 .inner_responses
@@ -685,7 +695,7 @@ fn make_responses_stream(
                             // Process spice tools - don't forward the completion event
                             let new_messages = match model
                                 .process_tool_calls_and_run_spice_tools(
-                                    to_input_item(req.input.clone()),
+                                    to_input_item(req.input.clone(), Role::User),
                                     spice_tools,
                                 )
                                 .await
@@ -836,11 +846,39 @@ fn create_new_recursive_req(
     new_req
 }
 
-fn to_input_item(input: InputParam) -> Vec<InputItem> {
+/// Append git state context to the last user message in a Responses API request.
+fn append_git_state_to_responses_request(req: &mut CreateResponse, git_state: &str) {
+    if git_state.is_empty() {
+        return;
+    }
+
+    let items = to_input_item(
+        std::mem::replace(&mut req.input, InputParam::Items(vec![])),
+        Role::System,
+    );
+
+    // Find the last user EasyMessage with text content and append git state.
+    let mut items = items;
+    for item in items.iter_mut().rev() {
+        if let InputItem::EasyMessage(EasyInputMessage {
+            content: EasyInputContent::Text(text),
+            role: Role::User,
+            ..
+        }) = item
+        {
+            text.push_str(git_state);
+            req.input = InputParam::Items(items);
+            return;
+        }
+    }
+    req.input = InputParam::Items(items);
+}
+
+fn to_input_item(input: InputParam, role: Role) -> Vec<InputItem> {
     match input {
         InputParam::Text(text) => vec![InputItem::EasyMessage(EasyInputMessage {
             content: EasyInputContent::Text(text),
-            role: Role::User,
+            role,
             r#type: MessageType::Message,
         })],
         InputParam::Items(items) => items,

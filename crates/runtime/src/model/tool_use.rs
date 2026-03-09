@@ -47,6 +47,8 @@ use tokio::sync::mpsc;
 use tools::SpiceModelTool;
 use tracing::{Instrument, Span};
 
+use async_openai::types::chat::ChatCompletionRequestUserMessageContent;
+
 use crate::Runtime;
 use crate::model::{ModelContextExtension, SingleShotExtension};
 use crate::model::context::{ContextConfig, manage_chat_context, truncate_tool_output};
@@ -55,6 +57,67 @@ use crate::tools::builtin::plan_mode::{
 };
 use llms::progress::Progress;
 use runtime_request_context::{AsyncMarker, RequestContext};
+
+/// Get the current git state (branch + last 3 commits) as a context string.
+/// Returns empty string on any error (not a git repo, git not available, etc.).
+pub(super) async fn get_git_state_context() -> String {
+    let branch = tokio::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+    let Some(branch) = branch else {
+        return String::new();
+    };
+
+    let log = tokio::process::Command::new("git")
+        .args(["log", "--oneline", "-3"])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let commits: String = log
+        .lines()
+        .map(|l| format!("  - {l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "\n\n[Current Git State]\nBranch: {branch}\nLast 3 commits:\n{commits}"
+    )
+}
+
+/// Append git state context to the last user message in the request.
+fn append_git_state_to_request(
+    req: &mut CreateChatCompletionRequest,
+    git_state: &str,
+) {
+    if git_state.is_empty() {
+        return;
+    }
+
+    // Find the last user message and append the git state
+    for msg in req.messages.iter_mut().rev() {
+        if let ChatCompletionRequestMessage::User(user_msg) = msg {
+            match &mut user_msg.content {
+                ChatCompletionRequestUserMessageContent::Text(text) => {
+                    text.push_str(git_state);
+                    return;
+                }
+                ChatCompletionRequestUserMessageContent::Array(_) => {
+                    // For array content (multimodal), skip — don't modify
+                    return;
+                }
+            }
+        }
+    }
+}
 
 pub struct ToolUsingChat {
     inner_chat: Arc<dyn Chat>,
@@ -368,14 +431,20 @@ impl ToolUsingChat {
                 tracing::warn!(
                     "Tool-use recursion limit reached. Will call model, but not process further tool calls."
                 );
-                let inner_req = self.add_runtime_tools(&req);
+                let mut inner_req = self.add_runtime_tools(&req);
+                let git_state = get_git_state_context().await;
+                append_git_state_to_request(&mut inner_req, &git_state);
                 return self.inner_chat.chat_request(inner_req).await;
             }
 
             tracing::info!(recursion_remaining = recursion_limit, "Calling model");
 
             // Append spiced runtime tools to the request.
-            let inner_req = self.add_runtime_tools(&req);
+            let mut inner_req = self.add_runtime_tools(&req);
+
+            // Inject current git state into the last user message
+            let git_state = get_git_state_context().await;
+            append_git_state_to_request(&mut inner_req, &git_state);
 
             let resp = match self.inner_chat.chat_request(inner_req.clone()).await {
                 Ok(resp) => resp,
@@ -648,14 +717,18 @@ impl ToolUsingChat {
             tracing::warn!(
                 "Tool-use recursion limit reached. Will call model, but not process further tool calls."
             );
-            let updated_req = self.add_runtime_tools(&req);
+            let mut updated_req = self.add_runtime_tools(&req);
+            let git_state = get_git_state_context().await;
+            append_git_state_to_request(&mut updated_req, &git_state);
             return self.inner_chat.chat_stream(updated_req).await;
         }
 
         tracing::info!(recursion_remaining = ?self.recursion_limit, "Calling model (streaming)");
 
         // Append spiced runtime tools to the request. Avoid clone if no runtime tools.
-        let updated_req = self.add_runtime_tools(&req);
+        let mut updated_req = self.add_runtime_tools(&req);
+        let git_state = get_git_state_context().await;
+        append_git_state_to_request(&mut updated_req, &git_state);
         let s = self.inner_chat.chat_stream(updated_req.clone()).await?;
 
         Ok(make_a_stream(
