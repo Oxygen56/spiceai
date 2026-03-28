@@ -29,7 +29,6 @@ use spicepod::{
         catalog::Catalog,
         dataset::Dataset,
         embeddings::Embeddings,
-        eval::Eval,
         file_source::FileSource,
         management::Management,
         model::Model,
@@ -64,8 +63,6 @@ pub struct App {
     pub models: Vec<Model>,
 
     pub embeddings: Vec<Embeddings>,
-
-    pub evals: Vec<Eval>,
 
     pub tools: Vec<Tool>,
 
@@ -109,7 +106,6 @@ impl Default for App {
             views: vec![],
             models: vec![],
             embeddings: vec![],
-            evals: vec![],
             tools: vec![],
             write_tools: vec![],
             workers: vec![],
@@ -143,7 +139,6 @@ pub struct AppBuilder {
     views: Vec<View>,
     models: Vec<Model>,
     embeddings: Vec<Embeddings>,
-    evals: Vec<Eval>,
     tools: Vec<Tool>,
     write_tools: Vec<WriteTool>,
     workers: Vec<Worker>,
@@ -166,7 +161,6 @@ impl AppBuilder {
             views: vec![],
             models: vec![],
             embeddings: vec![],
-            evals: vec![],
             tools: vec![],
             write_tools: vec![],
             workers: vec![],
@@ -194,7 +188,6 @@ impl AppBuilder {
         self.views.extend(spicepod.views.clone());
         self.models.extend(spicepod.models.clone());
         self.embeddings.extend(spicepod.embeddings.clone());
-        self.evals.extend(spicepod.evals.clone());
         self.tools.extend(spicepod.tools.clone());
         self.write_tools.extend(spicepod.write_tools.clone());
         self.workers.extend(spicepod.workers.clone());
@@ -271,12 +264,6 @@ impl AppBuilder {
     #[must_use]
     pub fn with_model(mut self, model: Model) -> AppBuilder {
         self.models.push(model);
-        self
-    }
-
-    #[must_use]
-    pub fn with_eval(mut self, eval: Eval) -> AppBuilder {
-        self.evals.push(eval);
         self
     }
 
@@ -369,7 +356,6 @@ impl AppBuilder {
             views: self.views,
             models: self.models,
             embeddings: self.embeddings,
-            evals: self.evals,
             tools: self.tools,
             write_tools: self.write_tools,
             workers: self.workers,
@@ -402,7 +388,6 @@ impl AppBuilder {
         let mut views: Vec<View> = vec![];
         let mut models: Vec<Model> = vec![];
         let mut embeddings: Vec<Embeddings> = vec![];
-        let mut evals: Vec<Eval> = vec![];
         let mut tools: Vec<Tool> = vec![];
         let mut write_tools: Vec<WriteTool> = vec![];
         let mut workers: Vec<Worker> = vec![];
@@ -427,10 +412,6 @@ impl AppBuilder {
 
         for embedding in &spicepod.embeddings {
             embeddings.push(embedding.clone());
-        }
-
-        for eval in &spicepod.evals {
-            evals.push(eval.clone());
         }
 
         for tool in &spicepod.tools {
@@ -478,10 +459,6 @@ impl AppBuilder {
             }
             for embedding in &dependent_spicepod.embeddings {
                 embeddings.push(embedding.clone());
-            }
-
-            for eval in &dependent_spicepod.evals {
-                evals.push(eval.clone());
             }
 
             for tool in &dependent_spicepod.tools {
@@ -542,7 +519,6 @@ impl AppBuilder {
             views,
             models,
             embeddings,
-            evals,
             tools,
             write_tools,
             workers,

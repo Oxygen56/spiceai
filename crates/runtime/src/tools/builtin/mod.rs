@@ -39,4 +39,3 @@ pub mod search;
 pub mod slack;
 pub mod sql;
 pub mod table_schema;
-pub mod web_search;
