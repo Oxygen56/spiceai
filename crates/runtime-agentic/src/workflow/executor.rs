@@ -141,6 +141,16 @@ async fn execute_workflow_inner(
     let mut step_output = serde_json::to_string(&payload.data).unwrap_or_default();
     let mut steps_executed = 0;
 
+    tracing::info!(
+        workflow = %workflow.name,
+        agent = %workflow.agent_name,
+        model = %workflow.default_model,
+        step_count = workflow.steps.len(),
+        trigger_source = %payload.source,
+        payload_size = step_output.len(),
+        "Starting workflow execution"
+    );
+
     for (step_index, resolved_step) in workflow.steps.iter().enumerate() {
         let step_start = Instant::now();
 
@@ -159,6 +169,20 @@ async fn execute_workflow_inner(
                     workflow = %workflow.name,
                     step_index = step_index,
                     step_type = "standard",
+                );
+
+                let required_tool_names: Vec<String> = step.required_write_tools.iter().map(|t| t.name().to_string()).collect();
+                let optional_tool_names: Vec<String> = step.optional_write_tools.iter().map(|t| t.name().to_string()).collect();
+                tracing::info!(
+                    step = %step.name,
+                    model = %model_name,
+                    step_index = step_index,
+                    required_tools = ?required_tool_names,
+                    optional_tools = ?optional_tool_names,
+                    read_tools = step.read_tools.len(),
+                    max_iterations = step.max_iterations,
+                    input_length = step_output.len(),
+                    "Starting step execution"
                 );
 
                 let step_result: Result<String, Box<dyn std::error::Error + Send + Sync>> = async {

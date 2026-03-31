@@ -25,6 +25,7 @@ use async_openai::types::chat::{
     CreateChatCompletionRequestArgs, FunctionObject,
 };
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use tools::SpiceModelTool;
 use tracing_futures::Instrument;
 
@@ -47,6 +48,7 @@ use crate::session::SessionStore;
 use crate::trigger::schedule::ScheduleTriggerFactory;
 use crate::trigger::webhook::WebhookTriggerFactory;
 use crate::trigger::{Trigger, TriggerHandler, TriggerPayload, TriggerRegistry};
+use crate::datafusion::DataFusion;
 use crate::tools::file_source_tools;
 use crate::Runtime;
 use app::App;
@@ -76,6 +78,7 @@ struct PipelineTriggerHandler {
     session_config: SessionConfig,
     memory_manager: Option<MemoryManager>,
     model_caller: Arc<dyn ModelCaller>,
+    df: Arc<DataFusion>,
 }
 
 #[async_trait]
@@ -99,8 +102,44 @@ impl TriggerHandler for PipelineTriggerHandler {
             pipeline = %result.workflow_name,
             session_id = %result.session_id,
             steps = result.steps_executed,
+            output_length = result.final_output.len(),
+            output_preview = %result.final_output.chars().take(300).collect::<String>(),
             "Pipeline execution completed"
         );
+
+        // Persist execution result to agentic.default.agent_results table.
+        let id = uuid::Uuid::now_v7().to_string();
+        let agent_name = sql_escape(&self.pipeline.agent_name);
+        let pipeline_name = sql_escape(&result.workflow_name);
+        let trigger_source = sql_escape(&payload.source);
+        let output = sql_escape(&result.final_output);
+        let insert_sql = format!(
+            "INSERT INTO agentic.default.agent_results VALUES \
+             ('{id}', '{agent_name}', '{pipeline_name}', '{trigger_source}', '{output}', NOW())"
+        );
+        match self.df.query_builder(&insert_sql).build().run().await {
+            Ok(query_result) => {
+                // Drain the stream to ensure the write is committed.
+                if let Err(e) = query_result.data.try_collect::<Vec<_>>().await {
+                    tracing::warn!(
+                        pipeline = %result.workflow_name,
+                        error = %e,
+                        "Failed to commit agent result write"
+                    );
+                } else {
+                    tracing::info!(
+                        id = %id,
+                        pipeline = %result.workflow_name,
+                        "Agent result stored in agentic.default.agent_results"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                pipeline = %result.workflow_name,
+                error = %e,
+                "Failed to persist agent result to agentic.default.agent_results"
+            ),
+        }
 
         Ok(())
     }
@@ -208,6 +247,15 @@ impl RuntimeModelCaller {
             "Starting tool loop"
         );
 
+        tracing::info!(
+            step = %step_name,
+            model = %model_name,
+            max_iterations = max_iterations,
+            tool_count = all_step_tools.len(),
+            tools = ?all_step_tools.iter().map(|t| t.name().to_string()).collect::<Vec<_>>(),
+            "Starting tool loop for step"
+        );
+
         for iteration in 0..max_iterations {
             tracing::debug!(
                 target: "task_history",
@@ -236,6 +284,14 @@ impl RuntimeModelCaller {
                 }
                 let req = req_builder.build()?;
 
+                tracing::info!(
+                    step = %step_name,
+                    model = %model_name,
+                    iteration = iteration,
+                    message_count = current_messages.len(),
+                    "Sending request to model"
+                );
+
                 let response = model.chat_request(req).await?;
 
                 // Check for step-level tool calls (against all tools, not just active)
@@ -248,9 +304,11 @@ impl RuntimeModelCaller {
                         .first()
                         .and_then(|ChatChoice { message, .. }| message.content.clone())
                         .unwrap_or_default();
-                    tracing::debug!(
-                        target: "task_history",
-                        "Model returned final response without tool calls"
+                    tracing::info!(
+                        step = %step_name,
+                        iteration = iteration,
+                        content_length = content.len(),
+                        "Model returned final response (no tool calls)"
                     );
                     return Ok(IterationOutcome::Done(content, HashSet::new()));
                 }
@@ -260,11 +318,12 @@ impl RuntimeModelCaller {
                     .filter_map(|tc| Self::find_tool(all_step_tools, &tc.function.name))
                     .map(|t| t.name().to_string())
                     .collect();
-                tracing::debug!(
-                    target: "task_history",
+                tracing::info!(
+                    step = %step_name,
+                    iteration = iteration,
                     count = step_tool_calls.len(),
                     tools = ?tool_names,
-                    "Model called step tools"
+                    "Model requested tool calls"
                 );
 
                 // Execute the step tools and build messages for the next round
@@ -392,20 +451,37 @@ impl RuntimeModelCaller {
                                 target: "task_history",
                                 tool = %tool.name(),
                                 args = %tool_call.function.arguments,
-                                "Executing step tool"
+                                "Executing tool"
                             );
+                            let tool_start = std::time::Instant::now();
                             let result = match tool.call(&tool_call.function.arguments).await {
-                                Ok(v) => v.to_string(),
-                                Err(e) => format!("Tool error: {e}"),
+                                Ok(v) => {
+                                    let r = v.to_string();
+                                    tracing::info!(
+                                        tool = %tool.name(),
+                                        result_length = r.len(),
+                                        duration_ms = tool_start.elapsed().as_millis() as u64,
+                                        result_preview = %r.chars().take(200).collect::<String>(),
+                                        "Tool returned result"
+                                    );
+                                    r
+                                },
+                                Err(e) => {
+                                    tracing::warn!(
+                                        tool = %tool.name(),
+                                        error = %e,
+                                        duration_ms = tool_start.elapsed().as_millis() as u64,
+                                        "Tool execution failed"
+                                    );
+                                    format!("Tool error: {e}")
+                                },
                             };
-                            tracing::debug!(
-                                target: "task_history",
-                                tool = %tool.name(),
-                                result_length = result.len(),
-                                "Tool execution completed"
-                            );
                             result
                         } else {
+                            tracing::warn!(
+                                tool = %tool_call.function.name,
+                                "Unknown tool called by model"
+                            );
                             "Unknown tool".to_string()
                         };
 
@@ -624,6 +700,8 @@ impl Runtime {
                 return;
             }
 
+            ensure_agent_results_table(&self.df).await;
+
             for agent in &app.agents {
                 tracing::info!("Loading agent [{}]...", agent.name);
                 match Self::load_agent(Arc::clone(&self), app, agent).await {
@@ -764,6 +842,7 @@ impl Runtime {
                 session_config: session_config.clone(),
                 memory_manager: memory_manager.clone(),
                 model_caller: Arc::clone(&model_caller),
+                df: rt.datafusion(),
             });
 
             // For webhook triggers, register the handler in the webhook registry
@@ -841,4 +920,35 @@ fn build_memory_manager(agent: &Agent) -> Option<MemoryManager> {
         .unwrap_or(50);
 
     Some(MemoryManager::new(layers, session_threshold))
+}
+
+/// Escape single quotes in a string for safe SQL insertion.
+fn sql_escape(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+const AGENT_RESULTS_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS agentic.default.agent_results (\
+  \"id\" TEXT NOT NULL, \
+  \"agent_name\" TEXT, \
+  \"pipeline_name\" TEXT, \
+  \"trigger_source\" TEXT, \
+  \"output\" TEXT, \
+  \"created_at\" TIMESTAMP, \
+  PRIMARY KEY (\"id\")\
+)";
+
+/// Ensure the `agentic.default.agent_results` table exists.
+/// Silently skips if the `agentic` catalog is not configured.
+pub async fn ensure_agent_results_table(df: &Arc<DataFusion>) {
+    match df.query_builder(AGENT_RESULTS_DDL).build().run().await {
+        Ok(query_result) => {
+            if let Err(e) = query_result.data.try_collect::<Vec<_>>().await {
+                tracing::warn!("Failed to commit agent_results table creation: {e}");
+            } else {
+                tracing::info!("Agent results table ready");
+            }
+        }
+        Err(e) => tracing::warn!("Could not create agent_results table (is the 'agentic' catalog configured?): {e}"),
+    }
 }
