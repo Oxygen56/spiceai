@@ -27,6 +27,8 @@ use crate::file_source::github::GitFileSourceFactory;
 use crate::file_source::s3::S3FileSourceFactory;
 use crate::file_source::{FileSourceConnector, FileSourceConnectorFactory};
 use crate::Runtime;
+use runtime_secrets::get_params_with_secrets;
+use secrecy::ExposeSecret;
 
 /// Registry of file source connector factories keyed by prefix.
 fn build_factory_registry() -> HashMap<String, Box<dyn FileSourceConnectorFactory>> {
@@ -86,8 +88,12 @@ impl Runtime {
                 continue;
             }
 
-            // Build params including the 'from' field for the factory
-            let mut params = file_source.params.clone();
+            // Resolve secrets in params (e.g. ${secrets:GITHUB_TOKEN})
+            let resolved = get_params_with_secrets(self.secrets(), &file_source.params).await;
+            let mut params: HashMap<String, String> = resolved
+                .into_iter()
+                .map(|(k, v)| (k, v.expose_secret().to_string()))
+                .collect();
             params.insert("from".to_string(), file_source.from.clone());
 
             let connector = match factory.create(target_path.clone(), params).await {
