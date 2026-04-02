@@ -854,6 +854,13 @@ fn create_new_recursive_req(
 
     // Context management: prune old tool outputs and inject budget status if needed.
     if let Some(usage) = marginal_usage {
+        tracing::info!(
+            prompt_tokens = usage.prompt_tokens,
+            context_window = ?context_config.context_window,
+            message_count = new_msg.len(),
+            should_prune = context_config.should_prune(usage.prompt_tokens),
+            "Creating recursive request with context management"
+        );
         manage_chat_context(context_config, &mut new_msg, usage.prompt_tokens);
     }
 
@@ -1138,7 +1145,12 @@ fn make_a_stream(
                                         continue;
                                     }
                                     Err(e) => {
-                                        tracing::error!("Error processing tool calls: {e}");
+                                        tracing::error!(
+                                            error = %e,
+                                            message_count = req.messages.len(),
+                                            model = %req.model,
+                                            "Error processing tool calls in streaming loop"
+                                        );
                                         let error_msg = format!("An error occurred while processing tool calls: {e}");
                                         if let Ok(error_resp) = create_stream_response(
                                             &stream_id,
@@ -1173,7 +1185,12 @@ fn make_a_stream(
                                         }
                                     }
                                     Err(e) => {
-                                        tracing::error!("Error from recursive chat_stream: {e}");
+                                        tracing::error!(
+                                            error = %e,
+                                            message_count = req.messages.len(),
+                                            model = %req.model,
+                                            "Error from recursive chat_stream"
+                                        );
                                         let error_msg = format!("An error occurred: {e}");
                                         if let Ok(error_resp) = create_stream_response(
                                             &stream_id,

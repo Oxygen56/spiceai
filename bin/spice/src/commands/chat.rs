@@ -453,7 +453,12 @@ async fn send_chat_streaming(
 
     // Use a client without timeout for SSE streaming — tool-use loops can take
     // minutes, and the server-side SSE keep-alive handles idle detection.
+    // Disable automatic decompression to avoid "error decoding response body"
+    // when reading raw SSE byte streams.
     let streaming_client = reqwest::Client::builder()
+        .no_gzip()
+        .no_deflate()
+        .no_brotli()
         .build()
         .unwrap_or_default();
 

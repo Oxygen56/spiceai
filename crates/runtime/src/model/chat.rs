@@ -31,7 +31,7 @@ use spicepod::component::model::{Model, ModelFileType, ModelSource};
 use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 use token_provider::registry::TokenProviderRegistry;
 
-use super::context::extract_context_config;
+use super::context::{extract_context_config, default_context_window_for_model};
 use super::wrapper::OPENAI_DEFAULT_PARAM_KEYS;
 use super::{params::get_params_spec, tool_use::ToolUsingChat, wrapper::ChatWrapper};
 use crate::token_providers::databricks::{DatabricksM2MTokenProvider, DatabricksU2MTokenProvider};
@@ -108,9 +108,22 @@ pub async fn try_to_chat_model(
         .or(Some(DEFAULT_SPICE_TOOL_RECURSION_LIMIT));
 
     // Extract context management configuration from model params.
-    let context_config = extract_context_config(|key| {
+    let mut context_config = extract_context_config(|key| {
         extract_secret!(params, key).map(ToString::to_string)
     });
+    // If no explicit context_window was set, use a known default for the model family.
+    if context_config.context_window.is_none() {
+        let model_id = component.get_model_id().unwrap_or_default();
+        if let Some(default_window) = default_context_window_for_model(&model_id) {
+            tracing::info!(
+                model = %component.name,
+                model_id = %model_id,
+                context_window = default_window,
+                "Using default context window for model family"
+            );
+            context_config.context_window = Some(default_window);
+        }
+    }
 
     // Create table allowlist from model's datasets if specified
     let table_allowlist = create_table_allowlist(&component.datasets);

@@ -331,6 +331,26 @@ where
     config
 }
 
+/// Return a default context window size (in tokens) for known model families.
+/// Returns `None` for unrecognised models — the caller should leave pruning
+/// disabled in that case.
+pub fn default_context_window_for_model(model_id: &str) -> Option<u32> {
+    let id = model_id.to_lowercase();
+    if id.starts_with("gpt-4") || id.starts_with("gpt-5") || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
+        return Some(128_000);
+    }
+    if id.starts_with("gpt-3") {
+        return Some(16_384);
+    }
+    if id.starts_with("claude") {
+        return Some(200_000);
+    }
+    if id.starts_with("gemini") {
+        return Some(1_000_000);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
