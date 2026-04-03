@@ -31,7 +31,8 @@ use async_openai::types::chat::{
     ChatChoiceStream, ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageArgs,
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
-    ChatCompletionRequestToolMessageArgs, ChatCompletionResponseStream, ChatCompletionTool,
+    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestToolMessageContent,
+    ChatCompletionResponseStream, ChatCompletionTool,
     ChatCompletionToolChoiceOption, ChatCompletionTools, CompletionTokensDetails, CompletionUsage,
     CreateChatCompletionRequest, CreateChatCompletionResponse,
     CreateChatCompletionStreamResponse, FinishReason, FunctionCall, FunctionObject,
@@ -47,7 +48,9 @@ use tokio::sync::mpsc;
 use tools::SpiceModelTool;
 use tracing::{Instrument, Span};
 
-use async_openai::types::chat::ChatCompletionRequestUserMessageContent;
+use async_openai::types::chat::{
+    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessageContent,
+};
 
 use crate::Runtime;
 use crate::model::{ModelContextExtension, SingleShotExtension};
@@ -260,7 +263,7 @@ impl ToolUsingChat {
             Some(t) => match t.call(&tool_call.function.arguments).await {
                 Ok(v) => {
                     let v = truncate_tool_output(v, self.context_config.max_tool_output_chars);
-                    tracing::info!(
+                    tracing::debug!(
                         target: "task_history",
                         progress = Progress::log()
                             .id(Some(tool_call.id.clone()))
@@ -271,7 +274,7 @@ impl ToolUsingChat {
                     v
                 }
                 Err(e) => {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "task_history",
                         progress = Progress::error()
                             .id(Some(tool_call.id.clone()))
@@ -323,7 +326,7 @@ impl ToolUsingChat {
             .cloned()
             .collect_vec();
 
-        tracing::debug!(
+        tracing::trace!(
             "spiced_tools available: {:?}. Used {:?}",
             self.tools.iter().map(|t| t.name()).collect_vec(),
             spiced_tools
@@ -331,7 +334,7 @@ impl ToolUsingChat {
 
         // Return early if no spiced runtime tools used.
         if spiced_tools.is_empty() {
-            tracing::debug!("No spiced tools used by chat model, returning early");
+            tracing::trace!("No spiced tools used by chat model, returning early");
             return Ok(None);
         }
 
@@ -349,7 +352,7 @@ impl ToolUsingChat {
 
         let mut tool_and_response_content = vec![];
         for t in spiced_tools.clone() {
-            tracing::info!(
+            tracing::debug!(
                 target: "task_history",
                 progress = Progress::log()
                     .id(Some(t.id.clone()))
@@ -357,14 +360,14 @@ impl ToolUsingChat {
                     .content(t.function.arguments.clone())
                     .to_jsonl(),
             );
-            tracing::info!(tool = %t.function.name, args = %t.function.arguments, "Calling tool");
+            tracing::trace!(tool = %t.function.name, args = %t.function.arguments, "Calling tool");
 
             let content = self.call_tool(&t).await;
             let result_preview = match &content {
                 Value::String(s) => s.chars().take(500).collect::<String>(),
                 other => other.to_string().chars().take(500).collect::<String>(),
             };
-            tracing::info!(tool = %t.function.name, result_chars = result_preview.len(), result = %result_preview, "Tool returned");
+            tracing::trace!(tool = %t.function.name, result_chars = result_preview.len(), result = %result_preview, "Tool returned");
             tool_and_response_content.push((t, content));
         }
 
@@ -375,7 +378,7 @@ impl ToolUsingChat {
                 other => other.to_string().len(),
             })
             .sum();
-        tracing::info!(
+        tracing::trace!(
             tool_count = tool_and_response_content.len(),
             total_result_chars,
             "Sending tool results back to model"
@@ -418,29 +421,74 @@ impl ToolUsingChat {
         recent_tool_fingerprints: Vec<u64>,
         plan_mode: bool,
     ) -> Result<CreateChatCompletionResponse, OpenAIError> {
-        Box::pin(async move {
-            // Don't use spice runtime tools if users has explicitly chosen to not use any tools.
-            if req.tool_choice.as_ref().is_some_and(|c| {
-                *c == ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::None)
-            }) {
-                tracing::debug!("User asked for no tools, calling inner chat model");
-                return self.inner_chat.chat_request(req).await;
-            }
+        // Don't use spice runtime tools if users has explicitly chosen to not use any tools.
+        if req.tool_choice.as_ref().is_some_and(|c| {
+            *c == ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::None)
+        }) {
+            tracing::trace!("User asked for no tools, calling inner chat model");
+            return self.inner_chat.chat_request(req).await;
+        }
 
-            if recursion_limit.is_some_and(|f| f == 0) {
+        let mut current_req = req;
+        let mut remaining = recursion_limit;
+        let mut fingerprints = recent_tool_fingerprints;
+        let mut accumulated_usage: Option<CompletionUsage> = None;
+        let mut current_plan_mode = plan_mode;
+
+        loop {
+            if remaining.is_some_and(|f| f == 0) {
                 tracing::warn!(
-                    "Tool-use recursion limit reached. Will call model, but not process further tool calls."
+                    "Tool-use iteration limit reached. Will call model, but not process further tool calls."
                 );
-                let mut inner_req = self.add_runtime_tools(&req);
+                let mut inner_req = self.add_runtime_tools(&current_req);
                 let git_state = get_git_state_context().await;
                 append_git_state_to_request(&mut inner_req, &git_state);
-                return self.inner_chat.chat_request(inner_req).await;
+                let mut resp = self.inner_chat.chat_request(inner_req).await?;
+                resp.usage = combine_usage(accumulated_usage, resp.usage);
+                return Ok(resp);
             }
 
-            tracing::info!(recursion_remaining = recursion_limit, "Calling model");
+            // --- Request log ---
+            let last_msg_preview: String = current_req.messages.last()
+                .map(|m| match m {
+                    ChatCompletionRequestMessage::Tool(t) => {
+                        let content = serde_json::to_string(&t.content).unwrap_or_default();
+                        format!("[tool:{}] {}", t.tool_call_id, content.chars().take(150).collect::<String>())
+                    },
+                    ChatCompletionRequestMessage::Assistant(a) => {
+                        if let Some(ref tc) = a.tool_calls {
+                            let names: Vec<String> = tc.iter().map(|t| match t {
+                                ChatCompletionMessageToolCalls::Function(f) => f.function.name.clone(),
+                                ChatCompletionMessageToolCalls::Custom(_) => "custom".into(),
+                            }).collect();
+                            format!("[assistant] tool_calls: {}", names.join(", "))
+                        } else {
+                            let content = a.content.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default()).unwrap_or_default();
+                            format!("[assistant] {}", content.chars().take(150).collect::<String>())
+                        }
+                    },
+                    ChatCompletionRequestMessage::System(s) => match &s.content {
+                        ChatCompletionRequestSystemMessageContent::Text(t) => format!("[system] {}", t.chars().take(150).collect::<String>()),
+                        _ => "[system]".into(),
+                    },
+                    ChatCompletionRequestMessage::User(u) => match &u.content {
+                        ChatCompletionRequestUserMessageContent::Text(t) => format!("[user] {}", t.chars().take(150).collect::<String>()),
+                        _ => "[user]".into(),
+                    },
+                    _ => "[other]".into(),
+                })
+                .unwrap_or_default();
+            let acc_tokens = accumulated_usage.as_ref().map_or(0, |u| u.total_tokens);
+            tracing::debug!(
+                last_message = %last_msg_preview,
+                iterations_remaining = remaining,
+                message_count = current_req.messages.len(),
+                accumulated_tokens = acc_tokens,
+                "Tool loop → request"
+            );
 
             // Append spiced runtime tools to the request.
-            let mut inner_req = self.add_runtime_tools(&req);
+            let mut inner_req = self.add_runtime_tools(&current_req);
 
             // Inject current git state into the last user message
             let git_state = get_git_state_context().await;
@@ -453,15 +501,13 @@ impl ToolUsingChat {
                     return Err(e);
                 }
             };
-            let usage = resp.usage.clone();
 
-            // ChatCompletionMessageToolCall
+            // Extract tool calls from response
             let tools_used = resp
                 .choices
                 .first()
                 .and_then(|c| c.message.tool_calls.clone());
 
-            // Extract inner ChatCompletionMessageToolCall from the ChatCompletionMessageToolCalls enum
             let tool_calls: Vec<ChatCompletionMessageToolCall> = tools_used
                 .unwrap_or_default()
                 .iter()
@@ -471,13 +517,38 @@ impl ToolUsingChat {
                 })
                 .collect();
 
+            // --- Response log ---
+            let content_preview: String = resp.choices.first()
+                .and_then(|c| c.message.content.as_ref())
+                .map(|c| c.chars().take(200).collect::<String>())
+                .unwrap_or_default();
+            let tool_names: Vec<String> = tool_calls.iter()
+                .map(|tc| decode_tool_name(&tc.function.name))
+                .collect();
+            let resp_usage = resp.usage.as_ref();
+            let prompt_tok = resp_usage.map_or(0, |u| u.prompt_tokens);
+            let context_window = self.context_config.context_window.unwrap_or(0);
+            let context_budget = if context_window > 0 {
+                format!("~{}K/{}K tokens used", prompt_tok / 1000, context_window / 1000)
+            } else {
+                format!("~{}K tokens used", prompt_tok / 1000)
+            };
+            tracing::info!(
+                tools = ?tool_names,
+                content_preview = %content_preview,
+                iterations_remaining = remaining,
+                context = %context_budget,
+                completion_tokens = resp_usage.map_or(0, |u| u.completion_tokens),
+                tool_calls = tool_calls.len(),
+                "Tool loop ← response"
+            );
+
             // Compute fingerprint for loop detection.
             let fingerprint = chat_tool_calls_fingerprint(&tool_calls);
-            let mut fingerprints = recent_tool_fingerprints;
             fingerprints.push(fingerprint);
 
             // Intercept plan mode tools before normal processing.
-            let mut next_plan_mode = plan_mode;
+            let mut next_plan_mode = current_plan_mode;
             let mut plan_mode_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
             let mut remaining_tool_calls: Vec<ChatCompletionMessageToolCall> = Vec::new();
 
@@ -499,7 +570,7 @@ impl ToolUsingChat {
                         .unwrap_or_default();
 
                     if !plan_text.is_empty() {
-                        tracing::info!(target: "task_history", plan = %plan_text, "Agent plan submitted");
+                        tracing::debug!(target: "task_history", plan = %plan_text, "Agent plan submitted");
                     }
 
                     // Auto-call approval tool if one exists
@@ -514,7 +585,7 @@ impl ToolUsingChat {
                             "context": plan_text,
                         }).to_string();
 
-                        tracing::info!(target: "task_history", "Plan submitted for approval, waiting...");
+                        tracing::debug!(target: "task_history", "Plan submitted for approval, waiting...");
 
                         match approval.call(&approval_arg).await {
                             Ok(result) => {
@@ -560,16 +631,12 @@ impl ToolUsingChat {
             // If plan mode tools were intercepted, we need to handle messages manually
             let has_plan_mode_tools = !plan_mode_messages.is_empty();
 
-            match self
-                .process_tool_calls_and_run_spice_tools(req.messages, remaining_tool_calls)
+            let new_messages = match self
+                .process_tool_calls_and_run_spice_tools(current_req.messages.clone(), remaining_tool_calls)
                 .await?
             {
-                // New messages means we have run spice tools locally, ready to recall model.
                 Some(mut messages) => {
-                    // Insert plan mode tool responses into the message stream
                     if has_plan_mode_tools {
-                        // The assistant message in `messages` only has non-plan-mode tool calls.
-                        // We need to rebuild it with ALL tool calls (including plan mode ones).
                         messages = vec![
                             ChatCompletionRequestAssistantMessageArgs::default()
                                 .tool_calls(
@@ -581,9 +648,7 @@ impl ToolUsingChat {
                                 .build()?
                                 .into(),
                         ];
-                        // Add plan mode responses first
                         messages.extend(plan_mode_messages);
-                        // Then add regular tool responses from process_tool_calls
                         for tc in &tool_calls {
                             let decoded = decode_tool_name(&tc.function.name);
                             if decoded != ENTER_PLAN_MODE_TOOL_NAME && decoded != EXIT_PLAN_MODE_TOOL_NAME {
@@ -598,44 +663,9 @@ impl ToolUsingChat {
                             }
                         }
                     }
-
-                    // Detect repeated identical tool calls (3 consecutive identical fingerprints).
-                    if is_tool_loop_detected(&fingerprints) {
-                        tracing::warn!("Tool-use loop detected: identical tool calls repeated 3 times");
-                        messages.push(
-                            ChatCompletionRequestSystemMessageArgs::default()
-                                .content(LOOP_DETECTION_MESSAGE)
-                                .build()?
-                                .into(),
-                        );
-                    }
-
-                    let mut resp = match self
-                        .chat_request_inner(
-                            create_new_recursive_req(
-                                &inner_req,
-                                messages,
-                                resp.usage.as_ref(),
-                                &self.context_config,
-                            ),
-                            recursion_limit.map(|r| r - 1),
-                            fingerprints,
-                            next_plan_mode,
-                        )
-                        .await
-                    {
-                        Ok(resp) => resp,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Model API request failed after sending tool results");
-                            return Err(e);
-                        }
-                    };
-                    resp.usage = combine_usage(usage, resp.usage);
-                    Ok(resp)
+                    Some(messages)
                 }
                 None if has_plan_mode_tools => {
-                    // Only plan mode tools were called — no regular spice tools.
-                    // Build messages manually.
                     let mut messages = vec![
                         ChatCompletionRequestAssistantMessageArgs::default()
                             .tool_calls(
@@ -648,34 +678,45 @@ impl ToolUsingChat {
                             .into(),
                     ];
                     messages.extend(plan_mode_messages);
-
-                    let mut resp = match self
-                        .chat_request_inner(
-                            create_new_recursive_req(
-                                &inner_req,
-                                messages,
-                                resp.usage.as_ref(),
-                                &self.context_config,
-                            ),
-                            recursion_limit.map(|r| r - 1),
-                            fingerprints,
-                            next_plan_mode,
-                        )
-                        .await
-                    {
-                        Ok(resp) => resp,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Model API request failed after sending tool results");
-                            return Err(e);
-                        }
-                    };
-                    resp.usage = combine_usage(usage, resp.usage);
-                    Ok(resp)
+                    Some(messages)
                 }
-                None => Ok(resp),
+                None => None,
+            };
+
+            match new_messages {
+                Some(mut messages) => {
+                    // Detect repeated identical tool calls (3 consecutive identical fingerprints).
+                    if is_tool_loop_detected(&fingerprints) {
+                        tracing::warn!("Tool-use loop detected: identical tool calls repeated 3 times");
+                        messages.push(
+                            ChatCompletionRequestSystemMessageArgs::default()
+                                .content(LOOP_DETECTION_MESSAGE)
+                                .build()?
+                                .into(),
+                        );
+                    }
+
+                    // Prepare next iteration (no recursion)
+                    let usage_ref = resp.usage.clone();
+                    accumulated_usage = combine_usage(accumulated_usage, resp.usage);
+                    current_req = create_new_recursive_req(
+                        &inner_req,
+                        messages,
+                        usage_ref.as_ref(),
+                        &self.context_config,
+                    );
+                    remaining = remaining.map(|r| r - 1);
+                    current_plan_mode = next_plan_mode;
+                    // continue loop
+                }
+                None => {
+                    // No tool calls to process — return final response.
+                    let mut resp = resp;
+                    resp.usage = combine_usage(accumulated_usage, resp.usage);
+                    return Ok(resp);
+                }
             }
-        })
-        .await
+        }
     }
 
     /// Add the spice runtime tools to a list of tools (may contain external tools too), and ensure no duplicates.
@@ -723,7 +764,7 @@ impl ToolUsingChat {
             return self.inner_chat.chat_stream(updated_req).await;
         }
 
-        tracing::info!(recursion_remaining = ?self.recursion_limit, "Calling model (streaming)");
+        tracing::debug!(recursion_remaining = ?self.recursion_limit, "Calling model (streaming)");
 
         // Append spiced runtime tools to the request. Avoid clone if no runtime tools.
         let mut updated_req = self.add_runtime_tools(&req);
@@ -854,7 +895,7 @@ fn create_new_recursive_req(
 
     // Context management: prune old tool outputs and inject budget status if needed.
     if let Some(usage) = marginal_usage {
-        tracing::info!(
+        tracing::trace!(
             prompt_tokens = usage.prompt_tokens,
             context_window = ?context_config.context_window,
             message_count = new_msg.len(),
@@ -863,6 +904,12 @@ fn create_new_recursive_req(
         );
         manage_chat_context(context_config, &mut new_msg, usage.prompt_tokens);
     }
+
+    // Append ephemeral guidance to the last tool result message so the model
+    // sees it right before generating its next response. Strip any previous
+    // copy first so it never accumulates across iterations.
+    strip_ephemeral_guidance(&mut new_msg);
+    append_ephemeral_guidance(&mut new_msg);
 
     new_req.messages = new_msg;
 
@@ -873,7 +920,7 @@ fn create_new_recursive_req(
         Some(ChatCompletionToolChoiceOption::Function(_)) | None
     ) {
         // Auto is default when tools exist.
-        tracing::debug!("Not recursively using named tool_choice in subsequent calls.");
+        tracing::trace!("Not recursively using named tool_choice in subsequent calls.");
         new_req.tool_choice = Some(ChatCompletionToolChoiceOption::Mode(
             ToolChoiceOptions::Auto,
         ));
@@ -1233,7 +1280,7 @@ fn make_a_stream(
                             }
                 }
 
-                tracing::info!(target: "task_history", captured_output = %chat_output);
+                tracing::debug!(target: "task_history", captured_output = %chat_output);
             })
             .instrument(span),
     );
@@ -1241,6 +1288,35 @@ fn make_a_stream(
 }
 
 const LOOP_DETECTION_MESSAGE: &str = "You have called the same tool(s) with identical arguments multiple times and received the same results. The state has not changed. Please take a different action, proceed to the next step of your task, or report what is blocking you.";
+
+/// Ephemeral guidance appended to the last tool result each iteration.
+/// Stripped from previous messages before being re-appended so it never accumulates.
+const TOOL_USE_GUIDANCE_SUFFIX: &str = "\n\nIMPORTANT: Before making your next tool call, review your recent actions above. Make sure each call makes forward progress. Do not call the same tool or query the same data source again — even with different parameters, limits, or formatting. If your last few steps look repetitive or circular, stop immediately and produce your response with the information you already have.";
+
+/// Strip the ephemeral guidance suffix from any tool result message that contains it.
+fn strip_ephemeral_guidance(messages: &mut [ChatCompletionRequestMessage]) {
+    for msg in messages.iter_mut() {
+        if let ChatCompletionRequestMessage::Tool(tool_msg) = msg {
+            if let ChatCompletionRequestToolMessageContent::Text(text) = &mut tool_msg.content {
+                if let Some(idx) = text.find(TOOL_USE_GUIDANCE_SUFFIX) {
+                    text.truncate(idx);
+                }
+            }
+        }
+    }
+}
+
+/// Append the ephemeral guidance to the last tool result message.
+fn append_ephemeral_guidance(messages: &mut [ChatCompletionRequestMessage]) {
+    for msg in messages.iter_mut().rev() {
+        if let ChatCompletionRequestMessage::Tool(tool_msg) = msg {
+            if let ChatCompletionRequestToolMessageContent::Text(text) = &mut tool_msg.content {
+                text.push_str(TOOL_USE_GUIDANCE_SUFFIX);
+                return;
+            }
+        }
+    }
+}
 
 /// Compute a fingerprint (hash) of the tool calls for loop detection.
 fn chat_tool_calls_fingerprint(calls: &[ChatCompletionMessageToolCall]) -> u64 {
