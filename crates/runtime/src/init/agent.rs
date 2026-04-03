@@ -461,7 +461,7 @@ impl RuntimeModelCaller {
                                         tool = %tool.name(),
                                         result_length = r.len(),
                                         duration_ms = tool_start.elapsed().as_millis() as u64,
-                                        result_preview = %r.chars().take(200).collect::<String>(),
+                                        result_preview = %r.chars().take(500).collect::<String>(),
                                         "Tool returned result"
                                     );
                                     r

@@ -167,19 +167,6 @@ impl GitTool {
             }
         }
 
-        // Reject --hard in reset args (destructive — discards uncommitted changes)
-        if req.operation == "reset" {
-            if let Some(ref args) = req.args {
-                if args.iter().any(|a| a == "--hard") {
-                    return Err(
-                        "Hard reset is not allowed. Use '--soft' or '--mixed' (default) instead."
-                            .to_string()
-                            .into(),
-                    );
-                }
-            }
-        }
-
         // Validate cherry-pick has commits (unless --abort/--continue/--skip)
         if req.operation == "cherry-pick" {
             let has_control_flag = req.args.as_ref().map_or(false, |args| {
@@ -400,27 +387,27 @@ impl GitTool {
             }
             "push" => {
                 cmd.arg("push");
-                let remote = req
-                    .remote
-                    .as_deref()
-                    .unwrap_or("origin");
-                cmd.arg(remote);
-                if let Some(ref branch) = req.branch {
-                    cmd.arg(branch);
+                // If args are provided, let them drive the command entirely
+                // (the agent may pass e.g. ["-u", "origin", "branch-name"]).
+                if let Some(ref args) = req.args {
+                    cmd.args(args);
                 } else {
-                    // Auto-detect current branch to avoid origin/HEAD resolution
-                    // failures (e.g. "refs/remotes/origin/HEAD cannot be resolved
-                    // to branch" in worktrees with broken symrefs).
-                    if let Ok(repo) = git2::Repository::open(work_dir) {
-                        if let Ok(head) = repo.head() {
-                            if let Some(branch_name) = head.shorthand() {
-                                cmd.arg(branch_name);
+                    let remote = req.remote.as_deref().unwrap_or("origin");
+                    cmd.arg(remote);
+                    if let Some(ref branch) = req.branch {
+                        cmd.arg(branch);
+                    } else {
+                        // Auto-detect current branch to avoid origin/HEAD resolution
+                        // failures (e.g. "refs/remotes/origin/HEAD cannot be resolved
+                        // to branch" in worktrees with broken symrefs).
+                        if let Ok(repo) = git2::Repository::open(work_dir) {
+                            if let Ok(head) = repo.head() {
+                                if let Some(branch_name) = head.shorthand() {
+                                    cmd.arg(branch_name);
+                                }
                             }
                         }
                     }
-                }
-                if let Some(ref args) = req.args {
-                    cmd.args(args);
                 }
             }
             "fetch" => {
@@ -876,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hard_reset_rejected() {
+    fn test_hard_reset_allowed() {
         let tool = make_tool(
             vec!["reset"],
             ToolCapability::ReadWrite,
@@ -892,15 +879,7 @@ mod tests {
             args: Some(vec!["--hard".to_string()]),
             worktree_name: None,
         };
-        let result = tool.validate_request(&req);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Hard reset is not allowed"),
-            "Expected hard reset rejection"
-        );
+        assert!(tool.validate_request(&req).is_ok());
     }
 
     #[test]

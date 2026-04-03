@@ -747,6 +747,10 @@ impl Query {
                     // DELETE operations need special handling because DataFusion doesn't
                     // support DELETE natively. We intercept the DML Delete plan, extract
                     // the filter predicates, and delegate to the DeletionTableProvider.
+                    tracing::debug!(
+                        table = %dml.table_name,
+                        "Intercepted DELETE DML plan, routing to DeletionTableProvider"
+                    );
                     let delete_plan =
                         match create_delete_physical_plan(dml, &ctx.df, &session).await {
                             Ok(p) => p,
@@ -826,6 +830,10 @@ impl Query {
                     (stream, update_plan)
                 } else {
                     // For regular plans, use the standard physical plan execution
+                    tracing::debug!(
+                        plan_type = %plan.display(),
+                        "Standard physical plan path (not intercepted as DELETE/UPDATE)"
+                    );
                     let physical_plan = match session.create_physical_plan(&plan).await {
                         Ok(stream) => stream,
                         Err(e) => {

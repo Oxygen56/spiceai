@@ -252,8 +252,8 @@ impl ToolUsingResponses {
             tracing::info!(tool = %t.name, args = %t.arguments, "Calling tool");
             let content = self.call_tool(&t).await;
             let result_preview = match &content {
-                Value::String(s) => s.chars().take(200).collect::<String>(),
-                other => other.to_string().chars().take(200).collect::<String>(),
+                Value::String(s) => s.chars().take(500).collect::<String>(),
+                other => other.to_string().chars().take(500).collect::<String>(),
             };
             tracing::info!(tool = %t.name, result_chars = result_preview.len(), result = %result_preview, "Tool returned");
             tool_and_response_content.push((t, content));
