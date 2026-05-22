@@ -3402,7 +3402,7 @@ dependencies = [
  "datafusion-dml",
  "datafusion-execution",
  "datafusion-expr",
- "datafusion-federation",
+ "datafusion-federation 0.4.2 (git+https://github.com/spiceai/datafusion-federation.git?rev=a4fce79433e5c2fe779427c0bfce6a599193e300)",
  "datafusion-functions",
  "datafusion-physical-expr",
  "datafusion-physical-plan",
@@ -3997,7 +3997,7 @@ dependencies = [
  "async-trait",
  "data_components",
  "datafusion",
- "datafusion-federation",
+ "datafusion-federation 0.4.2 (git+https://github.com/spiceai/datafusion-federation.git?rev=a4fce79433e5c2fe779427c0bfce6a599193e300)",
  "flight_client",
  "linkme",
  "ns_lookup",
@@ -5350,7 +5350,7 @@ dependencies = [
  "dataformat-json",
  "datafusion",
  "datafusion-datasource",
- "datafusion-federation",
+ "datafusion-federation 0.4.2 (git+https://github.com/spiceai/datafusion-federation.git?rev=a4fce79433e5c2fe779427c0bfce6a599193e300)",
  "datafusion-table-providers",
  "db_connection_pool",
  "delta_kernel",
@@ -5790,6 +5790,19 @@ dependencies = [
 [[package]]
 name = "datafusion-federation"
 version = "0.4.2"
+source = "git+https://github.com/spiceai/datafusion-federation.git?rev=6b6bfb0d30da8e5c2eb851094e366d98fa839575#6b6bfb0d30da8e5c2eb851094e366d98fa839575"
+dependencies = [
+ "arrow-json",
+ "async-stream",
+ "async-trait",
+ "datafusion",
+ "futures",
+ "tracing",
+]
+
+[[package]]
+name = "datafusion-federation"
+version = "0.4.2"
 source = "git+https://github.com/spiceai/datafusion-federation.git?rev=a4fce79433e5c2fe779427c0bfce6a599193e300#a4fce79433e5c2fe779427c0bfce6a599193e300"
 dependencies = [
  "arrow-json",
@@ -6008,7 +6021,7 @@ dependencies = [
  "datafusion",
  "datafusion-datasource",
  "datafusion-expr",
- "datafusion-federation",
+ "datafusion-federation 0.4.2 (git+https://github.com/spiceai/datafusion-federation.git?rev=a4fce79433e5c2fe779427c0bfce6a599193e300)",
  "datafusion-table-providers",
  "duckdb",
  "flight_client",
@@ -6257,7 +6270,7 @@ dependencies = [
 [[package]]
 name = "datafusion-table-providers"
 version = "0.1.0"
-source = "git+https://github.com/datafusion-contrib/datafusion-table-providers.git?rev=29f66085875f1d4d7b80fc1947e68c6835302241#29f66085875f1d4d7b80fc1947e68c6835302241"
+source = "git+https://github.com/datafusion-contrib/datafusion-table-providers.git?rev=06583052f01371e7e94fb6693ca2617b9214c3f1#06583052f01371e7e94fb6693ca2617b9214c3f1"
 dependencies = [
  "adbc_core",
  "adbc_driver_manager",
@@ -6274,7 +6287,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "datafusion",
- "datafusion-federation",
+ "datafusion-federation 0.4.2 (git+https://github.com/spiceai/datafusion-federation.git?rev=6b6bfb0d30da8e5c2eb851094e366d98fa839575)",
  "datafusion-physical-expr",
  "duckdb",
  "dyn-clone",
@@ -15881,7 +15894,7 @@ dependencies = [
  "datafusion-ddl",
  "datafusion-dml",
  "datafusion-expr",
- "datafusion-federation",
+ "datafusion-federation 0.4.2 (git+https://github.com/spiceai/datafusion-federation.git?rev=a4fce79433e5c2fe779427c0bfce6a599193e300)",
  "datafusion-functions-json",
  "datafusion-optimizer-rules",
  "datafusion-proto",
@@ -16163,7 +16176,7 @@ dependencies = [
  "datafusion",
  "datafusion-catalog",
  "datafusion-datasource",
- "datafusion-federation",
+ "datafusion-federation 0.4.2 (git+https://github.com/spiceai/datafusion-federation.git?rev=a4fce79433e5c2fe779427c0bfce6a599193e300)",
  "datafusion-optimizer-rules",
  "datafusion-pruning",
  "datafusion-table-providers",
