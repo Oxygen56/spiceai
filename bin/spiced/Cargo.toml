@@ -114,6 +114,7 @@ default = [
     "smb",
     "pingora",
     "scylladb",
+    "models",
     "odbc",
     "vortex",
     "http-functions",
