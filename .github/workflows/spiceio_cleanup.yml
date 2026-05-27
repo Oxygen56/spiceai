@@ -1,0 +1,124 @@
+name: UNAS Bucket Cleanup
+
+on:
+  schedule:
+    - cron: '0 13 * * *' # Daily at 6AM PT
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spiceio-bucket-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Clean ${{ matrix.bucket.name }}
+    runs-on: spiceai-macos
+    timeout-minutes: 60
+    env:
+      HAS_SPICEIO_SECRET: ${{ secrets.UNAS_SMB_PASS != '' }}
+      RETENTION_DAYS: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        bucket:
+          - name: sccache
+          - name: test_binaries
+
+    steps:
+      - name: Skip when Spice.io secret is unavailable
+        if: env.HAS_SPICEIO_SECRET != 'true'
+        run: echo "UNAS_SMB_PASS is not available; skipping Spice.io bucket cleanup."
+
+      - name: Set up spiceio
+        if: env.HAS_SPICEIO_SECRET == 'true'
+        id: setup-spiceio
+        uses: spiceai/spiceio/.github/actions/setup@e31c63cbe88a6e284fc187875261106a05034775 # v0.5.4
+        with:
+          smb-url: smb://runner@192.168.3.148/ai_platform_dev
+          smb-pass: ${{ secrets.UNAS_SMB_PASS }}
+          token: ${{ github.token }}
+          bucket: ${{ matrix.bucket.name }}
+          region: us-west-1
+
+      - name: Set up cleanup tools
+        if: env.HAS_SPICEIO_SECRET == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v aws >/dev/null 2>&1; then
+            brew install awscli
+          fi
+          if ! command -v jq >/dev/null 2>&1; then
+            brew install jq
+          fi
+          aws --version
+          jq --version
+
+      - name: Delete expired objects
+        if: env.HAS_SPICEIO_SECRET == 'true'
+        env:
+          BUCKET: ${{ matrix.bucket.name }}
+          SPICEIO_ENDPOINT: ${{ steps.setup-spiceio.outputs.endpoint }}
+          AWS_EC2_METADATA_DISABLED: true
+        run: |
+          set -euo pipefail
+          : "${SPICEIO_ENDPOINT:?spiceio endpoint is required for bucket cleanup}"
+
+          cutoff="$(python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S+00:00"))')"
+
+          aws_args=(
+            --endpoint-url "$SPICEIO_ENDPOINT"
+            --region us-west-1
+            --no-sign-request
+          )
+
+          total_deleted=0
+          continuation_args=()
+
+          while true; do
+            response_file="$(mktemp)"
+            delete_file="$(mktemp)"
+
+            aws "${aws_args[@]}" s3api list-objects-v2 \
+              --bucket "$BUCKET" \
+              "${continuation_args[@]}" \
+              --output json > "$response_file"
+
+            jq --arg cutoff "$cutoff" \
+              '{Objects: [.Contents[]? | select(.LastModified < $cutoff) | {Key}], Quiet: true}' \
+              "$response_file" > "$delete_file"
+
+            delete_count="$(jq '.Objects | length' "$delete_file")"
+            if [[ "$delete_count" -gt 0 ]]; then
+              aws "${aws_args[@]}" s3api delete-objects \
+                --bucket "$BUCKET" \
+                --delete "file://$delete_file" \
+                --output json
+              total_deleted=$((total_deleted + delete_count))
+            fi
+
+            next_token="$(jq -r '.NextContinuationToken // empty' "$response_file")"
+            rm -f "$response_file" "$delete_file"
+
+            if [[ -z "$next_token" ]]; then
+              break
+            fi
+
+            continuation_args=(--continuation-token "$next_token")
+          done
+
+          echo "Deleted $total_deleted objects from s3://$BUCKET older than $RETENTION_DAYS days."
+
+      - name: Kill spiceio
+        if: always() && steps.setup-spiceio.outputs.pid != ''
+        run: kill ${{ steps.setup-spiceio.outputs.pid }} || true
+
+      - name: Upload spiceio logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: spiceio-cleanup-${{ matrix.bucket.name }}-logs
+          path: ${{ runner.temp }}/spiceio.log
+          if-no-files-found: ignore
