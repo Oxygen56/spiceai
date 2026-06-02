@@ -111,9 +111,14 @@ impl PushMetricExporter for FilteringExporter {
         // collector to filter metrics at ingestion time.
         let should_export = self.has_any_matching_metrics(metrics);
 
+        let metric_count: usize = metrics.scope_metrics().map(|s| s.metrics().count()).sum();
+
         async move {
             if !should_export {
-                tracing::debug!("Skipping metrics export: no metrics match whitelist");
+                tracing::debug!(
+                    metric_count,
+                    "Skipping metrics export: no metrics match whitelist"
+                );
                 return Ok(());
             }
 
@@ -121,7 +126,7 @@ impl PushMetricExporter for FilteringExporter {
                 .export(metrics)
                 .await
                 .inspect(|_| {
-                    tracing::debug!("Successfully exported metrics");
+                    tracing::debug!(metric_count, "Successfully exported metrics");
                 })
                 .inspect_err(|err| {
                     match err {
