@@ -117,17 +117,25 @@ impl PushMetricExporter for FilteringExporter {
                 return Ok(());
             }
 
-            self.inner.export(metrics).await.inspect_err(|err| {
-                match err {
-                    opentelemetry_sdk::error::OTelSdkError::InternalFailure(msg) => {
-                        tracing::warn!("Failed to export metrics: {msg}");
+            self.inner
+                .export(metrics)
+                .await
+                .inspect(|_| {
+                    tracing::debug!("Successfully exported metrics");
+                })
+                .inspect_err(|err| {
+                    match err {
+                        opentelemetry_sdk::error::OTelSdkError::InternalFailure(msg) => {
+                            tracing::warn!("Failed to export metrics: {msg}");
+                        }
+                        opentelemetry_sdk::error::OTelSdkError::Timeout(duration) => {
+                            tracing::warn!(
+                                "Failed to export metrics: timed out after {duration:?}"
+                            );
+                        }
+                        opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown => (), // No logging needed
                     }
-                    opentelemetry_sdk::error::OTelSdkError::Timeout(duration) => {
-                        tracing::warn!("Failed to export metrics: timed out after {duration:?}");
-                    }
-                    opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown => (), // No logging needed
-                }
-            })
+                })
         }
     }
 
