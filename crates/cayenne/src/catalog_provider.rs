@@ -75,6 +75,13 @@ pub struct CayenneCatalogProviderConfig {
     pub inline_flush_max_bytes: Option<i64>,
     /// Primary-key conflict detection behavior for inserts.
     pub pk_conflict_detection: Option<PkConflictDetection>,
+    /// New current-snapshot files since the last compaction before a
+    /// post-write compaction pass is scheduled.
+    pub compaction_trigger_files: Option<usize>,
+    /// Protected snapshot count that triggers a fast subset compaction.
+    pub compaction_trigger_protected_snapshots: Option<usize>,
+    /// Maximum input files merged per compaction pass.
+    pub compaction_max_files_per_pick: Option<usize>,
 }
 
 /// Errors that can occur when interacting with a Cayenne catalog.
@@ -300,6 +307,15 @@ impl CayenneCatalogProvider {
         }
         if let Some(v) = provider_config.pk_conflict_detection {
             config.pk_conflict_detection = v;
+        }
+        if let Some(v) = provider_config.compaction_trigger_files {
+            config.compaction_trigger_files = v.max(1);
+        }
+        if let Some(v) = provider_config.compaction_trigger_protected_snapshots {
+            config.compaction_trigger_protected_snapshots = v.max(1);
+        }
+        if let Some(v) = provider_config.compaction_max_files_per_pick {
+            config.compaction_max_files_per_pick = v.max(2);
         }
         config
     }

@@ -77,6 +77,12 @@ pub const PARAMETERS: &[ParameterSpec] = &[
     ParameterSpec::component("inline_flush_max_bytes")
         .description("Maximum inline IPC bytes before checkpointing inline data to Vortex. Default: 8388608.")
         .default("8388608"),
+    ParameterSpec::component("compaction_trigger_files")
+        .description("New current-snapshot files since the last compaction before a post-write compaction pass is scheduled. Default: 8."),
+    ParameterSpec::component("compaction_trigger_protected_snapshots")
+        .description("Protected snapshot count that triggers a fast subset compaction. Lower values reduce per-scan protected-snapshot amplification at the cost of more frequent compaction. Default: 8."),
+    ParameterSpec::component("compaction_max_files_per_pick")
+        .description("Maximum input files merged per compaction pass. Default: 32."),
 ];
 
 /// A catalog connector for Cayenne lakehouse catalogs.
@@ -195,6 +201,27 @@ impl CayenneCatalogConnector {
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .map(|v| v.max(0));
+        let compaction_trigger_files = self
+            .params
+            .get("compaction_trigger_files")
+            .expose()
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| v.max(1));
+        let compaction_trigger_protected_snapshots = self
+            .params
+            .get("compaction_trigger_protected_snapshots")
+            .expose()
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| v.max(1));
+        let compaction_max_files_per_pick = self
+            .params
+            .get("compaction_max_files_per_pick")
+            .expose()
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| v.max(2));
 
         CayenneCatalogProviderConfig {
             data_dir,
@@ -213,6 +240,9 @@ impl CayenneCatalogConnector {
             inline_flush_max_rows,
             inline_flush_max_segments,
             inline_flush_max_bytes,
+            compaction_trigger_files,
+            compaction_trigger_protected_snapshots,
+            compaction_max_files_per_pick,
         }
     }
 }
